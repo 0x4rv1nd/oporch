@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oporch"
+version = "0.1.0"
+description = "Multi-agent orchestration system for OpenCode"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2",
+    "typer>=0.12",
+    "rich>=13",
+    "pyyaml>=6",
+]
+
+[project.scripts]
+oporch = "oporch.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
