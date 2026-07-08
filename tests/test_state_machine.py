@@ -97,3 +97,91 @@ class TestStateMachine:
         sm.transition(OrchestratorState.REVIEWING)
         sm.transition(OrchestratorState.EXECUTING)
         assert sm.current == OrchestratorState.EXECUTING
+
+    def test_cancelled_from_idle(self):
+        sm = StateMachine()
+        sm.transition(OrchestratorState.CANCELLED)
+        assert sm.is_terminal()
+
+    def test_cancelled_from_analyzing(self):
+        sm = StateMachine()
+        sm.transition(OrchestratorState.ANALYZING)
+        sm.transition(OrchestratorState.CANCELLED)
+        assert sm.is_terminal()
+
+    def test_cancelled_from_planning(self):
+        sm = StateMachine()
+        sm.transition(OrchestratorState.ANALYZING)
+        sm.transition(OrchestratorState.PLANNING)
+        sm.transition(OrchestratorState.CANCELLED)
+        assert sm.is_terminal()
+
+    def test_cancelled_from_executing(self):
+        sm = StateMachine()
+        sm.transition(OrchestratorState.ANALYZING)
+        sm.transition(OrchestratorState.PLANNING)
+        sm.transition(OrchestratorState.AWAITING_PLAN_APPROVAL)
+        sm.transition(OrchestratorState.EXECUTING)
+        sm.transition(OrchestratorState.CANCELLED)
+        assert sm.is_terminal()
+
+    def test_cancelled_from_reviewing(self):
+        sm = StateMachine()
+        sm.transition(OrchestratorState.ANALYZING)
+        sm.transition(OrchestratorState.PLANNING)
+        sm.transition(OrchestratorState.AWAITING_PLAN_APPROVAL)
+        sm.transition(OrchestratorState.EXECUTING)
+        sm.transition(OrchestratorState.REVIEWING)
+        sm.transition(OrchestratorState.CANCELLED)
+        assert sm.is_terminal()
+
+    def test_cancelled_from_testing(self):
+        sm = StateMachine()
+        sm.transition(OrchestratorState.ANALYZING)
+        sm.transition(OrchestratorState.PLANNING)
+        sm.transition(OrchestratorState.AWAITING_PLAN_APPROVAL)
+        sm.transition(OrchestratorState.EXECUTING)
+        sm.transition(OrchestratorState.REVIEWING)
+        sm.transition(OrchestratorState.TESTING)
+        sm.transition(OrchestratorState.CANCELLED)
+        assert sm.is_terminal()
+
+    def test_cancelled_from_debugging(self):
+        sm = StateMachine()
+        sm.transition(OrchestratorState.ANALYZING)
+        sm.transition(OrchestratorState.PLANNING)
+        sm.transition(OrchestratorState.AWAITING_PLAN_APPROVAL)
+        sm.transition(OrchestratorState.EXECUTING)
+        sm.transition(OrchestratorState.REVIEWING)
+        sm.transition(OrchestratorState.TESTING)
+        sm.transition(OrchestratorState.DEBUGGING)
+        sm.transition(OrchestratorState.CANCELLED)
+        assert sm.is_terminal()
+
+    def test_cancelled_from_validating(self):
+        sm = StateMachine()
+        sm.transition(OrchestratorState.ANALYZING)
+        sm.transition(OrchestratorState.PLANNING)
+        sm.transition(OrchestratorState.AWAITING_PLAN_APPROVAL)
+        sm.transition(OrchestratorState.EXECUTING)
+        sm.transition(OrchestratorState.REVIEWING)
+        sm.transition(OrchestratorState.TESTING)
+        sm.transition(OrchestratorState.VALIDATING)
+        sm.transition(OrchestratorState.CANCELLED)
+        assert sm.is_terminal()
+
+    def test_cancelled_not_from_completed(self):
+        """Terminal states cannot transition to CANCELLED."""
+        import pytest
+        sm = StateMachine()
+        sm.transition(OrchestratorState.ANALYZING)
+        sm.transition(OrchestratorState.PLANNING)
+        sm.transition(OrchestratorState.AWAITING_PLAN_APPROVAL)
+        sm.transition(OrchestratorState.EXECUTING)
+        sm.transition(OrchestratorState.REVIEWING)
+        sm.transition(OrchestratorState.TESTING)
+        sm.transition(OrchestratorState.VALIDATING)
+        sm.transition(OrchestratorState.COMPLETED)
+        with pytest.raises(InvalidTransitionError):
+            sm.transition(OrchestratorState.CANCELLED)
+

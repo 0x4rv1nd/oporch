@@ -12,12 +12,14 @@ from .models import (
     AgentResult,
     AgentTask,
     ContextPack,
+    MilestoneReport,
     PlannerContextPack,
     PlanResult,
     RunState,
     WorkerQuestion,
 )
 from .run_state import PersistentRunState, create_run_state
+from .runner import MilestoneRunner, RunnerError
 from .state_machine import StateMachine
 from .validate import validate_planner_output
 
@@ -173,6 +175,79 @@ class HeadOrchestrator:
         )
 
         return validation, plan_result
+
+    def run_milestone(self, run_id: str | None = None) -> MilestoneReport:
+        """Execute an approved plan.
+
+        If run_id is not provided, uses the current active run.
+        The plan must already be in AWAITING_PLAN_APPROVAL or EXECUTING state.
+        """
+        # Load the run
+        if run_id is None:
+            current = self.prs.load_current()
+            if current is None or current.run_id is None:
+                raise OrchestratorError("No active run found")
+            run_id = current.run_id
+
+        run_state = self.prs.load_run(run_id)
+        if run_state is None:
+            raise OrchestratorError(f"Run {run_id} not found")
+
+        # Initialize event log for this run
+        self._event_log = EventLog(run_id)
+
+        # Sync state machine to current run state
+        self.sm = StateMachine(initial_state=run_state.state)
+
+        # Transition from AWAITING_PLAN_APPROVAL to EXECUTING if needed
+        if run_state.state == OrchestratorState.AWAITING_PLAN_APPROVAL:
+            self.sm.transition(OrchestratorState.EXECUTING)
+            self._update_run_state(run_state, OrchestratorState.EXECUTING)
+
+        # Load policies
+        try:
+            policies = cfg.load_policies()
+        except Exception:
+            from .models import PoliciesConfig
+            policies = PoliciesConfig()
+
+        # Create and run the MilestoneRunner
+        runner = MilestoneRunner(
+            executor=self.executor,
+            prs=self.prs,
+            policies=policies,
+            state_machine=self.sm,
+            event_log=self.event_log,
+        )
+
+        return runner.run_milestone(run_state)
+
+    def resume_run(self) -> MilestoneReport:
+        """Resume an interrupted run from where it left off.
+
+        Finds the current run, reloads state, and continues execution
+        from the last incomplete work unit.
+        """
+        current = self.prs.load_current()
+        if current is None or current.run_id is None:
+            raise OrchestratorError("No active run to resume")
+
+        run_state = self.prs.load_run(current.run_id)
+        if run_state is None:
+            raise OrchestratorError(f"Run {current.run_id} not found")
+
+        if run_state.state in (
+            OrchestratorState.COMPLETED,
+            OrchestratorState.FAILED,
+            OrchestratorState.CANCELLED,
+        ):
+            raise OrchestratorError(
+                f"Run {current.run_id} is in terminal state {run_state.state.value}"
+            )
+
+        # Resume is essentially re-running — completed WUs are skipped
+        # because their status is already COMPLETED in the persisted state
+        return self.run_milestone(current.run_id)
 
     def _update_run_state(self, run: RunState, new_state: OrchestratorState) -> None:
         run.state = new_state

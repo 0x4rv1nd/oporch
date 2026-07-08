@@ -6,6 +6,7 @@ from typing import Any
 
 from .constants import AgentRole, EventType
 from .models import OrchestratorEvent
+from .redact import redact_secrets
 
 RUNS_DIR = Path(".opencode-orchestrator") / "runs"
 
@@ -29,8 +30,9 @@ class EventLog:
 
     def _append(self, event: OrchestratorEvent) -> None:
         import json
+        line = json.dumps(event.model_dump(mode="json"), default=str)
         with self._path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(event.model_dump(mode="json"), default=str) + "\n")
+            f.write(redact_secrets(line) + "\n")
 
     def record(
         self,

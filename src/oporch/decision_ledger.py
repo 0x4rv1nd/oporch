@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .models import OrchestratorDecision
+from .redact import redact_secrets
 
 STATE_DIR = Path(".opencode-orchestrator") / "state"
 
@@ -26,8 +27,9 @@ class DecisionLedger:
 
     def _append(self, decision: OrchestratorDecision) -> None:
         import json
+        line = json.dumps(decision.model_dump(mode="json"), default=str)
         with self._path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(decision.model_dump(mode="json"), default=str) + "\n")
+            f.write(redact_secrets(line) + "\n")
 
     def append(self, decision: OrchestratorDecision) -> None:
         if not decision.timestamp:

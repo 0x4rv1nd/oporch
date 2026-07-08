@@ -111,6 +111,15 @@ def status() -> None:
 
     work_units = prs.load_work_units(current.run_id)
     if work_units:
+        # Progress summary
+        completed = sum(1 for wu in work_units if wu.status.value == "COMPLETED")
+        failed = sum(1 for wu in work_units if wu.status.value == "FAILED")
+        total = len(work_units)
+        tree.add(
+            f"Progress: [green]{completed}[/green]/{total} completed"
+            + (f", [red]{failed} failed[/red]" if failed else "")
+        )
+
         wu_tree = Tree("Work Units")
         for wu in work_units:
             status_style = {
@@ -119,14 +128,20 @@ def status() -> None:
                 "FAILED": "red",
                 "PENDING": "white",
                 "BLOCKED": "yellow",
+                "READY": "cyan",
+                "SKIPPED": "dim",
             }.get(wu.status.value, "white")
+            attempt_info = f" (attempt {wu.attempts}/{wu.max_attempts})" if wu.attempts > 0 else ""
             node = wu_tree.add(
                 f"[{status_style}]{wu.id}[/{status_style}]: {wu.title} "
                 f"([{status_style}]{wu.status.value}[/{status_style}])"
+                f"{attempt_info}"
             )
             if wu.blockers:
                 for b in wu.blockers:
                     node.add(f"[red]blocked: {b}[/red]")
+            if wu.dependencies:
+                node.add(f"[dim]deps: {', '.join(wu.dependencies)}[/dim]")
         tree.add(wu_tree)
 
     console.print(tree)
@@ -191,22 +206,206 @@ def plan(
 
 
 @app.command()
-def run(milestone_id: str) -> None:
+def run(
+    milestone_id: str,
+    executor_type: str = typer.Option(
+        "fake", "--executor", "-e",
+        help="Executor to use: 'fake' (default) or 'opencode'",
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v",
+        help="Show detailed output during execution",
+    ),
+) -> None:
     """Execute approved milestone."""
-    console.print(f"[yellow]Run execution for {milestone_id} not yet implemented[/yellow]")
-    console.print("This will be implemented in a future milestone.")
+    from .executor import FakeAgentExecutor, OpenCodeAgentExecutor
+    from .orchestrator import HeadOrchestrator, OrchestratorError
+    from .run_state import PersistentRunState
+
+    prs = PersistentRunState()
+    current = prs.load_current()
+
+    if current is None or current.run_id is None:
+        console.print("[red]No active run found.[/red] Run 'oporch plan' first.")
+        raise typer.Exit(code=1)
+
+    if executor_type == "opencode":
+        executor = OpenCodeAgentExecutor()
+    else:
+        executor = FakeAgentExecutor()
+
+    orchestrator = HeadOrchestrator(executor=executor, run_state=prs)
+
+    console.print(f"[bold]Executing milestone[/bold] {milestone_id}")
+    console.print(f"  Run ID: {current.run_id}")
+    console.print(f"  Executor: {executor_type}")
+    console.print()
+
+    try:
+        report = orchestrator.run_milestone(current.run_id)
+    except OrchestratorError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(code=1)
+
+    # Display results
+    status_style = {
+        "COMPLETED": "green",
+        "FAILED": "red",
+        "CANCELLED": "yellow",
+    }.get(report.status, "white")
+
+    console.print(f"\n[{status_style}]Run {report.status}[/{status_style}]")
+    console.print(f"  Objective: {report.objective}")
+
+    # Show work unit summary
+    table = Table(title="Work Unit Results")
+    table.add_column("ID", style="bold")
+    table.add_column("Title")
+    table.add_column("Status")
+    table.add_column("Attempts")
+
+    for wu in report.work_units:
+        wu_style = {
+            "COMPLETED": "green",
+            "FAILED": "red",
+            "IN_PROGRESS": "blue",
+            "BLOCKED": "yellow",
+            "PENDING": "white",
+        }.get(wu.status.value, "white")
+        table.add_row(
+            wu.id,
+            wu.title,
+            f"[{wu_style}]{wu.status.value}[/{wu_style}]",
+            str(wu.attempts),
+        )
+
+    console.print(table)
+
+    if report.status == "FAILED":
+        raise typer.Exit(code=1)
 
 
 @app.command()
-def resume() -> None:
+def resume(
+    executor_type: str = typer.Option(
+        "fake", "--executor", "-e",
+        help="Executor to use: 'fake' (default) or 'opencode'",
+    ),
+) -> None:
     """Resume interrupted run."""
-    console.print("[yellow]Resume not yet implemented[/yellow]")
+    from .executor import FakeAgentExecutor, OpenCodeAgentExecutor
+    from .orchestrator import HeadOrchestrator, OrchestratorError
+    from .run_state import PersistentRunState
+
+    prs = PersistentRunState()
+
+    if executor_type == "opencode":
+        executor = OpenCodeAgentExecutor()
+    else:
+        executor = FakeAgentExecutor()
+
+    orchestrator = HeadOrchestrator(executor=executor, run_state=prs)
+
+    console.print("[bold]Resuming interrupted run...[/bold]")
+
+    try:
+        report = orchestrator.resume_run()
+    except OrchestratorError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(code=1)
+
+    status_style = {
+        "COMPLETED": "green",
+        "FAILED": "red",
+        "CANCELLED": "yellow",
+    }.get(report.status, "white")
+
+    console.print(f"\n[{status_style}]Run {report.status}[/{status_style}]")
+    console.print(f"  Objective: {report.objective}")
+
+    if report.status == "FAILED":
+        raise typer.Exit(code=1)
 
 
 @app.command()
 def report() -> None:
     """Generate evidence-backed final report."""
-    console.print("[yellow]Report generation not yet implemented[/yellow]")
+    from .run_state import PersistentRunState
+    from .models import MilestoneReport
+
+    prs = PersistentRunState()
+    current = prs.load_current()
+
+    if current is None or current.run_id is None:
+        console.print("[yellow]No active run[/yellow]")
+        raise typer.Exit(code=1)
+
+    # Try to load the report
+    run_path = prs.get_run_path(current.run_id)
+    report_path = run_path / "final_report.json"
+
+    if not report_path.exists():
+        console.print("[yellow]No report found.[/yellow] Run 'oporch run' first.")
+        raise typer.Exit(code=1)
+
+    import json
+    data = json.loads(report_path.read_text(encoding="utf-8"))
+    rpt = MilestoneReport(**data)
+
+    status_style = {
+        "COMPLETED": "green",
+        "FAILED": "red",
+        "CANCELLED": "yellow",
+    }.get(rpt.status, "white")
+
+    console.print(f"\n[bold]Milestone Report[/bold]")
+    console.print(f"  Objective: {rpt.objective}")
+    console.print(f"  Status: [{status_style}]{rpt.status}[/{status_style}]")
+
+    # Work units table
+    table = Table(title="Work Units")
+    table.add_column("ID", style="bold")
+    table.add_column("Title")
+    table.add_column("Status")
+    table.add_column("Attempts")
+
+    for wu in rpt.work_units:
+        wu_style = {
+            "COMPLETED": "green",
+            "FAILED": "red",
+            "IN_PROGRESS": "blue",
+            "BLOCKED": "yellow",
+            "PENDING": "white",
+        }.get(wu.status.value, "white")
+        table.add_row(
+            wu.id,
+            wu.title,
+            f"[{wu_style}]{wu.status.value}[/{wu_style}]",
+            str(wu.attempts),
+        )
+
+    console.print(table)
+
+    if rpt.files_changed:
+        console.print("\n[bold]Files Changed:[/bold]")
+        seen: set[str] = set()
+        for f in rpt.files_changed:
+            if f not in seen:
+                console.print(f"  - {f}")
+                seen.add(f)
+
+    if rpt.known_limitations:
+        console.print("\n[yellow]Known Limitations:[/yellow]")
+        for lim in rpt.known_limitations:
+            console.print(f"  - {lim}")
+
+    if rpt.unresolved_risks:
+        console.print("\n[red]Unresolved Risks:[/red]")
+        for risk in rpt.unresolved_risks:
+            console.print(f"  - {risk}")
+
+    if rpt.recommendation:
+        console.print(f"\n[bold]Recommendation:[/bold] {rpt.recommendation}")
 
 
 @app.command()
@@ -232,6 +431,72 @@ def models() -> None:
             model_id or "[red]--none--[/red]",
             status,
         )
+    console.print(table)
+
+@app.command()
+def logs(
+    last: int = typer.Option(
+        20, "--last", "-n",
+        help="Number of recent events to show",
+    ),
+) -> None:
+    """Show structured event log for current run."""
+    from .run_state import PersistentRunState
+    from .event_log import EventLog
+
+    prs = PersistentRunState()
+    current = prs.load_current()
+
+    if current is None or current.run_id is None:
+        console.print("[yellow]No active run[/yellow]")
+        raise typer.Exit(code=1)
+
+    event_log = EventLog(current.run_id)
+    events = event_log.all()
+
+    if not events:
+        console.print("[yellow]No events recorded yet[/yellow]")
+        return
+
+    # Show the last N events
+    display_events = events[-last:]
+
+    table = Table(title=f"Events (showing last {len(display_events)} of {len(events)})")
+    table.add_column("Timestamp", style="dim")
+    table.add_column("Event", style="bold")
+    table.add_column("Work Unit")
+    table.add_column("Role")
+    table.add_column("Details")
+
+    for event in display_events:
+        ts = event.timestamp.strftime("%H:%M:%S") if event.timestamp else "--"
+        wu = event.work_unit_id or "--"
+        role = event.agent_role.value if event.agent_role else "--"
+
+        # Summarize details
+        detail_parts: list[str] = []
+        for k, v in event.details.items():
+            if isinstance(v, str) and len(v) > 40:
+                v = v[:40] + "..."
+            detail_parts.append(f"{k}={v}")
+        details = ", ".join(detail_parts[:3]) if detail_parts else "--"
+
+        event_style = {
+            "RUN_COMPLETED": "green",
+            "WORK_UNIT_COMPLETED": "green",
+            "RUN_FAILED": "red",
+            "REVIEW_FAILED": "red",
+            "TEST_FAILED": "red",
+        }.get(event.event.value, "white")
+
+        table.add_row(
+            ts,
+            f"[{event_style}]{event.event.value}[/{event_style}]",
+            wu,
+            role,
+            details,
+        )
+
     console.print(table)
 
 

@@ -183,3 +183,96 @@ class TestHeadOrchestratorPlanMilestone:
         finally:
             import os
             os.chdir(str(original_cwd))
+
+
+class TestHeadOrchestratorRunMilestone:
+    def test_run_milestone_success(self, tmp_path):
+        original_cwd = Path.cwd()
+        try:
+            import os
+            os.chdir(str(tmp_path))
+
+            prs = PersistentRunState()
+            executor = FakeAgentExecutor()
+            orchestrator = HeadOrchestrator(executor=executor, run_state=prs)
+
+            # Setup a plan
+            from oporch.orchestrator import create_run_state
+            run = create_run_state("M1", "Do the thing")
+            run.state = OrchestratorState.AWAITING_PLAN_APPROVAL
+            prs.save_run(run)
+            prs.save_current(run)
+
+            # Save a work unit
+            from oporch.models import WorkUnit
+            wu = WorkUnit(
+                id="WU-001",
+                title="WU 1",
+                objective="Obj 1",
+                dependencies=[],
+                acceptance_criteria=["Works"],
+            )
+            prs.save_work_units(run.run_id, [wu])
+
+            report = orchestrator.run_milestone()
+
+            assert report.status == "COMPLETED"
+            assert orchestrator.sm.current == OrchestratorState.COMPLETED
+
+            # Verify run state updated on disk
+            updated_run = prs.load_run(run.run_id)
+            assert updated_run.state == OrchestratorState.COMPLETED
+        finally:
+            import os
+            os.chdir(str(original_cwd))
+
+    def test_resume_run_success(self, tmp_path):
+        original_cwd = Path.cwd()
+        try:
+            import os
+            os.chdir(str(tmp_path))
+
+            prs = PersistentRunState()
+            executor = FakeAgentExecutor()
+            orchestrator = HeadOrchestrator(executor=executor, run_state=prs)
+
+            # Setup run that is in AWAITING_PLAN_APPROVAL state
+            from oporch.orchestrator import create_run_state
+            run = create_run_state("M1", "Do the thing")
+            run.state = OrchestratorState.AWAITING_PLAN_APPROVAL
+            prs.save_run(run)
+            prs.save_current(run)
+
+            # Save work units, one complete, one pending
+            from oporch.models import WorkUnit
+            from oporch.constants import WorkUnitStatus
+            wu1 = WorkUnit(
+                id="WU-001",
+                title="WU 1",
+                objective="Obj 1",
+                status=WorkUnitStatus.COMPLETED,
+                dependencies=[],
+                acceptance_criteria=["Works"],
+            )
+            wu2 = WorkUnit(
+                id="WU-002",
+                title="WU 2",
+                objective="Obj 2",
+                dependencies=["WU-001"],
+                acceptance_criteria=["Works"],
+            )
+            prs.save_work_units(run.run_id, [wu1, wu2])
+
+            report = orchestrator.resume_run()
+
+            assert report.status == "COMPLETED"
+            
+            # WU-001 should not be rerun, WU-002 should run
+            # FakeAgentExecutor records calls. Let's filter for builders
+            builders = [c for c in executor.calls if c[0] == AgentRole.BUILDER]
+            assert len(builders) == 1
+            assert builders[0][1].work_unit_id == "WU-002"
+        finally:
+            import os
+            os.chdir(str(original_cwd))
+

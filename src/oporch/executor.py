@@ -19,10 +19,21 @@ class AgentExecutor(Protocol):
 class FakeAgentExecutor:
     def __init__(self) -> None:
         self.calls: list[tuple[AgentRole, AgentTask, ContextPack]] = []
-        self._next_result: AgentResult | None = None
+        self._next_results: list[AgentResult] = []
+
+    @property
+    def _next_result(self) -> AgentResult | None:
+        return self._next_results[0] if self._next_results else None
+
+    @_next_result.setter
+    def _next_result(self, value: AgentResult | None) -> None:
+        if value is None:
+            self._next_results.clear()
+        else:
+            self._next_results = [value]
 
     def set_next_result(self, result: AgentResult) -> None:
-        self._next_result = result
+        self._next_results.append(result)
 
     def run(
         self,
@@ -31,10 +42,8 @@ class FakeAgentExecutor:
         context: ContextPack,
     ) -> AgentResult:
         self.calls.append((role, task, context))
-        if self._next_result is not None:
-            result = self._next_result
-            self._next_result = None
-            return result
+        if self._next_results:
+            return self._next_results.pop(0)
         return AgentResult(
             role=role,
             success=True,
@@ -43,7 +52,7 @@ class FakeAgentExecutor:
 
     def reset(self) -> None:
         self.calls.clear()
-        self._next_result = None
+        self._next_results.clear()
 
 
 class OpenCodeAgentExecutor:
