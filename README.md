@@ -325,9 +325,29 @@ ruff check src/oporch/
 | Milestone | Focus | Status |
 |-----------|-------|--------|
 | **M0** | Foundation: CLI, models, config, state machine, persistence, DAG, executors, orchestration, validation | ✅ Done |
-| **M1** | Real agent dispatch: `run`/`resume`, OpenCodeAgentExecutor wiring, result collection | 🔜 |
-| **M2** | Reporting: `report` command, evidence aggregation, milestone reports | 🔜 |
-| **M3** | Escalation: user-in-the-loop, manual intervention, debugger integration | 🔜 |
+| **M1 (v2)** | SQLite storage layer (`db.py`, WAL), dynamic team composer + `COMPOSING_TEAM` state, plan-doc parser | ✅ Done |
+| **M2 (v2)** | Parallel dispatcher (async waves, per-role semaphores), git worktree isolation + supervisor merge gate | ✅ Done |
+| **M3 (v2)** | Live Textual dashboard (`oporch view`), agent-memory retrieval wiring, structured events | ✅ Done |
+| **M4 (v2)** | Roster auto-scaling, security hardening (redaction, sandboxed env, STRICT merge approvals), observability CLI (`replay`/`diff`/`report --failures`) | ✅ Done |
+
+### v2 command additions
+
+```bash
+oporch plan phase15.md        # 15-phase plan doc in → team composition → planning
+oporch run M1                 # parallel dispatch across the roster
+oporch view                   # live TUI dashboard (q/d/p) — safe alongside a run
+oporch team show / edit / history
+oporch memory list / add / forget / export / import
+oporch migrate-db             # backfill legacy JSON/JSONL into oporch.db
+oporch replay <run> [--wu X]  # reconstruct what happened
+oporch diff <run_a> <run_b>   # compare duration/attempts/failure rates
+oporch report --failures      # aggregate failure patterns per role/domain
+oporch approvals / approve    # STRICT-mode merge + spawn approvals
+```
+
+Deferred to v3: containerized/namespace sandboxing for agent subprocesses
+(§10 "stronger" tier) and supervisor dynamic-model selection + self-healing
+ladder (§11).
 
 ---
 

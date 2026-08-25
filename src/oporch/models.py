@@ -41,6 +41,53 @@ class CompletionGate(BaseModel):
     require_benchmark_evidence: bool = False
     max_critical_findings: int = 0
     max_high_findings: int = 0
+    # v2 (§7): WU cannot reach COMPLETED without passing the supervisor
+    # merge gate into the per-run integration branch.
+    require_supervisor_merge: bool = False
+
+
+class SecurityPolicy(BaseModel):
+    """v2 (§10): secrets boundary + merge safety rails."""
+
+    # Branches the supervisor must never auto-merge into. Enforced by
+    # git_manager refusing outright, not just convention.
+    never_auto_merge_to: list[str] = Field(
+        default_factory=lambda: ["main", "develop", "master"]
+    )
+    # STRICT approval mode disables auto-merge entirely and escalates every
+    # merge decision to a human.
+    strict_disables_auto_merge: bool = True
+
+
+class MergeConflictPolicy(BaseModel):
+    """v2 (§7): what happens when the supervisor hits a conflict."""
+
+    # "debugger" -> auto-route for a resolution attempt first (default);
+    # "user" -> escalate straight to AWAITING_USER_INPUT.
+    route: str = "debugger"
+    max_debugger_attempts: int = 1
+
+
+class RosterAutoScalePolicy(BaseModel):
+    """v2 (§8): phase-boundary roster adjustments."""
+
+    enabled: bool = False
+    # Spawn grows the budget; shrink/resize always auto-apply.
+    # When True, spawns park as pending approvals instead of applying live.
+    require_approval_for_spawn: bool = True
+
+
+class RosterAdjustment(BaseModel):
+    """One proposed roster change evaluated at a phase boundary (§8)."""
+
+    phase_number: int
+    action: str  # spawn | retire | resize | none
+    role_key: str | None = None
+    max_workers: int | None = None
+    based_on_domain: str | None = None
+    reason: str = ""
+    applied: bool = False
+    deferred_reason: str | None = None
 
 
 class ContextPolicy(BaseModel):
@@ -54,6 +101,9 @@ class PoliciesConfig(BaseModel):
     retry: RetryPolicy = RetryPolicy()
     completion_gate: CompletionGate = CompletionGate()
     context: ContextPolicy = ContextPolicy()
+    merge_conflict: MergeConflictPolicy = MergeConflictPolicy()
+    security: SecurityPolicy = SecurityPolicy()
+    roster_auto_scale: RosterAutoScalePolicy = RosterAutoScalePolicy()
 
 
 class ModelInfo(BaseModel):
@@ -61,10 +111,42 @@ class ModelInfo(BaseModel):
     model_id: str
     context_limit: int = 131072
     output_limit: int = 16384
+    tier: Literal["fast", "standard", "heavy"] = "standard"
 
 
 class ModelsConfig(BaseModel):
     models: dict[str, ModelInfo]
+
+
+class TeamRole(BaseModel):
+    """Dynamic roster role proposed by the team composer (v2).
+
+    ``key`` is a free-form slug ("backend", "db_migration", ...). Cross-cutting
+    quality-gate roles (reviewer/tester/supervisor) use the same shape.
+    """
+
+    key: str
+    description: str = ""
+    model: str = "deepseek-v4-flash"
+    fallback: str | None = None
+    max_workers: int = 2
+    domains: list[str] = Field(default_factory=list)
+    allowed_paths: list[str] | None = None
+
+
+class TeamRoster(BaseModel):
+    run_id: str
+    roles: list[TeamRole]
+    rationale: str = ""
+
+    def role_keys(self) -> list[str]:
+        return [r.key for r in self.roles]
+
+    def get(self, key: str) -> TeamRole | None:
+        for r in self.roles:
+            if r.key == key:
+                return r
+        return None
 
 
 class Evidence(BaseModel):
@@ -88,6 +170,8 @@ class ContextPack(BaseModel):
     acceptance_criteria: list[str] = Field(default_factory=list)
     diff: str | None = None
     failure_evidence: str | None = None
+    # v2 (§4): top-K agent_memory rows recalled for this role/project.
+    project_memory: list[str] = Field(default_factory=list)
 
 
 class WorkUnit(BaseModel):
@@ -96,7 +180,9 @@ class WorkUnit(BaseModel):
     objective: str
     status: WorkUnitStatus = WorkUnitStatus.PENDING
     dependencies: list[str] = Field(default_factory=list)
-    assigned_role: AgentRole = AgentRole.BUILDER
+    # v2: plain roster key string (dynamic team), not the fixed AgentRole enum.
+    assigned_role: str = "builder"
+    phase: int | None = None
     assigned_model: str | None = None
     input_context: str | None = None
     acceptance_criteria: list[str] = Field(default_factory=list)
@@ -112,6 +198,16 @@ class WorkUnit(BaseModel):
         if self.status not in (WorkUnitStatus.PENDING, WorkUnitStatus.BLOCKED):
             return False
         return all(dep in completed_ids for dep in self.dependencies)
+
+
+class Phase(BaseModel):
+    """One parsed phase of an implementation plan document (v2)."""
+
+    number: int
+    title: str
+    description: str | None = None
+    acceptance_criteria: list[str] = Field(default_factory=list)
+    raw: str | None = None
 
 
 class PlanResult(BaseModel):
@@ -215,7 +311,8 @@ class OrchestratorEvent(BaseModel):
     run_id: str
     event: EventType
     work_unit_id: str | None = None
-    agent_role: AgentRole | None = None
+    # v2: accepts fixed AgentRole enums or dynamic roster key strings.
+    agent_role: AgentRole | str | None = None
     details: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -263,10 +360,14 @@ class AgentTask(BaseModel):
     input_context: str | None = None
     max_attempts: int = 3
     raw_prompt: str | None = None
+    # v2 (§7): directory the agent subprocess runs in (per-WU worktree).
+    working_dir: str | None = None
 
 
 class AgentResult(BaseModel):
-    role: AgentRole
+    # v2: role is a roster key string; AgentRole enums compare equal to their
+    # string values so existing call sites keep working.
+    role: str = "builder"
     success: bool
     output: str = ""
     error: str | None = None

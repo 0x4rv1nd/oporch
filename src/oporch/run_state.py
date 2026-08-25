@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from .constants import OrchestratorState, SCHEMA_VERSION
+from .constants import OrchestratorState, SCHEMA_VERSION, WorkUnitStatus
 from pydantic import BaseModel
 
 from .models import CurrentRun, MilestoneReport, RunState, WorkUnit
@@ -51,8 +52,20 @@ def _save_json(path: Path, data: Any) -> None:
 
 
 class PersistentRunState:
-    def __init__(self) -> None:
+    """Persistent run state.
+
+    v2: authoritative storage is the SQLite database (``runs`` and
+    ``work_units`` tables); the legacy JSON files are kept as mirrors so
+    existing tooling keeps working. Public API unchanged.
+    """
+
+    def __init__(self, db: Any | None = None) -> None:
         _ensure_dirs()
+        if db is None:
+            from .db import OporchDB
+
+            db = OporchDB()
+        self._db = db
 
     def load_current(self) -> CurrentRun | None:
         path = STATE_DIR / "current_run.json"
@@ -83,15 +96,48 @@ class PersistentRunState:
         path = self.get_run_path(run_id) / "run_state.json"
         data = _load_json(path)
         if data is None:
-            return None
+            row = self._db.get_run(run_id)
+            if row is None:
+                return None
+            return RunState(
+                schema_version=SCHEMA_VERSION,
+                run_id=row["id"],
+                milestone_id=row["milestone_id"] or "",
+                objective="",
+                state=OrchestratorState(row["state"]) if row["state"] else OrchestratorState.IDLE,
+                created_at=datetime.fromisoformat(row["created_at"]),
+                updated_at=datetime.fromisoformat(row["updated_at"]),
+            )
         _check_schema_version(data, f"run_state.json ({run_id})")
         return RunState(**data)
 
     def save_run(self, run_state: RunState) -> None:
         path = self.get_run_path(run_state.run_id) / "run_state.json"
         _save_json(path, run_state.model_dump(mode="json"))
+        self._db.upsert_run(
+            run_state.run_id,
+            milestone_id=run_state.milestone_id,
+            state=run_state.state.value,
+            created_at=run_state.created_at.isoformat(),
+        )
 
     def load_work_units(self, run_id: str) -> list[WorkUnit]:
+        rows = self._db.load_work_unit_rows(run_id)
+        if rows:
+            units: list[WorkUnit] = []
+            for d in rows:
+                if not d.get("data"):
+                    continue
+                try:
+                    wu = WorkUnit(**json.loads(d["data"]))
+                    # Live columns win over the snapshot blob.
+                    wu.status = WorkUnitStatus(d["status"])
+                    wu.attempts = int(d["attempt"] or 0)
+                    units.append(wu)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+            if units:
+                return units
         path = self.get_run_path(run_id) / "work_units.json"
         data = _load_json(path)
         if data is None:
@@ -101,6 +147,7 @@ class PersistentRunState:
     def save_work_units(self, run_id: str, units: list[WorkUnit]) -> None:
         path = self.get_run_path(run_id) / "work_units.json"
         _save_json(path, [u.model_dump(mode="json") for u in units])
+        self._db.save_work_units(run_id, units)
 
     def load_milestones(self) -> list[dict[str, Any]]:
         path = STATE_DIR / "milestones.json"

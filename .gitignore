@@ -9,5 +9,6 @@ build/
 .venv/
 venv/
 .opencode-orchestrator/
+.opencode-orchestrator/*.db*
 *.code-workspace
 .DS_Store

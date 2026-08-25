@@ -6,19 +6,78 @@ from .constants import AgentRole
 from .models import AgentTask, AgentResult, ContextPack
 
 
+def role_key(role: AgentRole | str) -> str:
+    """Normalize an AgentRole enum or plain string to a roster key string."""
+    if hasattr(role, "value"):
+        return str(role.value)
+    return str(role)
+
+
 class AgentExecutor(Protocol):
     def run(
         self,
-        role: AgentRole,
+        role: AgentRole | str,
         task: AgentTask,
         context: ContextPack,
     ) -> AgentResult:
         ...
 
 
+EXEC_TIMEOUT_SECONDS = 300
+
+# §10 minimum sandbox: env vars an agent subprocess may inherit. Everything
+# else (AWS/Azure/GCP creds, DB URLs, arbitrary secrets) is stripped.
+_ENV_ALLOWLIST = {
+    "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC",
+    "TEMP", "TMP", "HOME", "USERPROFILE",
+    "APPDATA", "LOCALAPPDATA", "PROGRAMFILES", "PROGRAMDATA",
+}
+_ENV_PASSTHROUGH_PREFIXES = ("OPENCODE_", "OPORCH_")
+_ENV_DENY_PREFIXES = (
+    "AWS_", "AZURE_", "GOOGLE_API", "GOOGLE_APPLICATION",
+    "SNOWFLAKE", "DATADOG", "SENDGRID", "STRIPE", "TWILIO",
+)
+
+
+def build_restricted_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """Return a scrubbed copy of ``base`` (or os.environ) for agent subprocesses."""
+    import os
+
+    src = dict(base if base is not None else os.environ)
+    out: dict[str, str] = {}
+    for key, value in src.items():
+        upper = key.upper()
+        if any(upper.startswith(p) for p in _ENV_DENY_PREFIXES):
+            continue
+        if upper in _ENV_ALLOWLIST or any(
+            upper.startswith(p) for p in _ENV_PASSTHROUGH_PREFIXES
+        ):
+            out[key] = value
+    return out
+
+
+async def call_executor_async(
+    executor: Any,
+    role: AgentRole | str,
+    task: AgentTask,
+    context: ContextPack,
+) -> AgentResult:
+    """Await an agent execution, preferring ``run_async`` when available.
+
+    Falls back to running the sync ``run`` in a worker thread so any
+    executor implementation works with the parallel dispatcher.
+    """
+    run_async = getattr(executor, "run_async", None)
+    if run_async is not None:
+        return await run_async(role, task, context)
+    import asyncio
+
+    return await asyncio.to_thread(executor.run, role, task, context)
+
+
 class FakeAgentExecutor:
     def __init__(self) -> None:
-        self.calls: list[tuple[AgentRole, AgentTask, ContextPack]] = []
+        self.calls: list[tuple[AgentRole | str, AgentTask, ContextPack]] = []
         self._next_results: list[AgentResult] = []
 
     @property
@@ -37,7 +96,7 @@ class FakeAgentExecutor:
 
     def run(
         self,
-        role: AgentRole,
+        role: AgentRole | str,
         task: AgentTask,
         context: ContextPack,
     ) -> AgentResult:
@@ -45,7 +104,7 @@ class FakeAgentExecutor:
         if self._next_results:
             return self._next_results.pop(0)
         return AgentResult(
-            role=role,
+            role=role_key(role),
             success=True,
             output=f"Fake output for {task.objective}",
         )
@@ -54,24 +113,46 @@ class FakeAgentExecutor:
         self.calls.clear()
         self._next_results.clear()
 
+    async def run_async(
+        self,
+        role: AgentRole | str,
+        task: AgentTask,
+        context: ContextPack,
+    ) -> AgentResult:
+        return self.run(role, task, context)
+
 
 class OpenCodeAgentExecutor:
-    def __init__(self, opencode_cmd: str = "opencode") -> None:
+    def __init__(
+        self,
+        opencode_cmd: str = "opencode",
+        sandbox_env: bool = True,
+        env: dict[str, str] | None = None,
+    ) -> None:
         self._cmd = opencode_cmd
+        self._sandbox_env = sandbox_env
+        self._env = env
+
+    def _subprocess_env(self) -> dict[str, str] | None:
+        if not self._sandbox_env:
+            return self._env
+        return build_restricted_env(self._env)
 
     def run(
         self,
-        role: AgentRole,
+        role: AgentRole | str,
         task: AgentTask,
         context: ContextPack,
     ) -> AgentResult:
         import subprocess
 
-        prompt = self._build_prompt(role, task, context)
-        model_id = cfg.resolve_model(role.value)
+        key = role_key(role)
+        prompt = self._build_prompt(key, task, context)
+        model_id = cfg.resolve_model(key)
         cmd = [self._cmd, "-p", prompt]
         if model_id:
             cmd += ["-m", model_id]
+        cwd = task.working_dir or None
 
         try:
             result = subprocess.run(
@@ -79,23 +160,75 @@ class OpenCodeAgentExecutor:
                 capture_output=True,
                 text=True,
                 timeout=300,
+                cwd=cwd,
+                env=self._subprocess_env(),
             )
             return AgentResult(
-                role=role,
+                role=key,
                 success=result.returncode == 0,
                 output=result.stdout,
                 error=result.stderr if result.returncode != 0 else None,
             )
         except subprocess.TimeoutExpired:
             return AgentResult(
-                role=role,
+                role=key,
                 success=False,
                 output="",
                 error="Timeout expired",
             )
         except FileNotFoundError:
             return AgentResult(
-                role=role,
+                role=key,
+                success=False,
+                output="",
+                error=f"OpenCode command '{self._cmd}' not found",
+            )
+
+    async def run_async(
+        self,
+        role: AgentRole | str,
+        task: AgentTask,
+        context: ContextPack,
+    ) -> AgentResult:
+        """Non-blocking variant of :meth:`run` using asyncio subprocesses."""
+        import asyncio
+
+        key = role_key(role)
+        prompt = self._build_prompt(key, task, context)
+        model_id = cfg.resolve_model(key)
+        cmd = [self._cmd, "-p", prompt]
+        if model_id:
+            cmd += ["-m", model_id]
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=task.working_dir or None,
+                env=self._subprocess_env(),
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=EXEC_TIMEOUT_SECONDS
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return AgentResult(
+                    role=key, success=False, output="", error="Timeout expired",
+                )
+            out = stdout.decode("utf-8", errors="replace")
+            err = stderr.decode("utf-8", errors="replace")
+            return AgentResult(
+                role=key,
+                success=proc.returncode == 0,
+                output=out,
+                error=err if proc.returncode != 0 else None,
+            )
+        except FileNotFoundError:
+            return AgentResult(
+                role=key,
                 success=False,
                 output="",
                 error=f"OpenCode command '{self._cmd}' not found",
@@ -103,13 +236,13 @@ class OpenCodeAgentExecutor:
 
     def _build_prompt(
         self,
-        role: AgentRole,
+        role: AgentRole | str,
         task: AgentTask,
         context: ContextPack,
     ) -> str:
         if task.raw_prompt:
             return task.raw_prompt
-        parts = [f"You are acting as {role.value}."]
+        parts = [f"You are acting as {role_key(role)}."]
         parts.append(f"Objective: {task.objective}")
         if task.work_unit_id:
             parts.append(f"Work Unit: {task.work_unit_id}")
@@ -132,5 +265,11 @@ class OpenCodeAgentExecutor:
             parts.append(
                 "Architecture constraints:\n"
                 + "\n".join(f"- {c}" for c in context.architecture_constraints)
+            )
+        if context.project_memory:
+            parts.append(
+                "## Known project memory\n"
+                "Lessons from previous runs on this project — respect them:\n"
+                + "\n".join(f"- {m}" for m in context.project_memory)
             )
         return "\n\n".join(parts)

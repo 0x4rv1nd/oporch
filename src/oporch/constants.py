@@ -15,11 +15,15 @@ class AgentRole(str, Enum):
     DEBUGGER = "debugger"
     RESEARCHER = "researcher"
     BENCHMARK_ANALYST = "benchmark_analyst"
+    # v2: thin cross-cutting merge-gate role (§7). Only the supervisor may
+    # merge into the per-run integration branch.
+    SUPERVISOR = "supervisor"
 
 
 class OrchestratorState(str, Enum):
     IDLE = "IDLE"
     ANALYZING = "ANALYZING"
+    COMPOSING_TEAM = "COMPOSING_TEAM"
     PLANNING = "PLANNING"
     AWAITING_PLAN_APPROVAL = "AWAITING_PLAN_APPROVAL"
     EXECUTING = "EXECUTING"
@@ -36,7 +40,20 @@ class OrchestratorState(str, Enum):
 
 STATE_TRANSITIONS: dict[OrchestratorState, list[OrchestratorState]] = {
     OrchestratorState.IDLE: [OrchestratorState.ANALYZING, OrchestratorState.CANCELLED],
-    OrchestratorState.ANALYZING: [OrchestratorState.PLANNING, OrchestratorState.FAILED, OrchestratorState.CANCELLED],
+    # PLANNING kept reachable directly for objective-only plans without a
+    # plan document; plan-doc input goes through COMPOSING_TEAM first.
+    OrchestratorState.ANALYZING: [
+        OrchestratorState.COMPOSING_TEAM,
+        OrchestratorState.PLANNING,
+        OrchestratorState.FAILED,
+        OrchestratorState.CANCELLED,
+    ],
+    OrchestratorState.COMPOSING_TEAM: [
+        OrchestratorState.PLANNING,
+        OrchestratorState.AWAITING_USER_INPUT,
+        OrchestratorState.FAILED,
+        OrchestratorState.CANCELLED,
+    ],
     OrchestratorState.PLANNING: [OrchestratorState.AWAITING_PLAN_APPROVAL, OrchestratorState.FAILED, OrchestratorState.CANCELLED],
     OrchestratorState.AWAITING_PLAN_APPROVAL: [OrchestratorState.EXECUTING, OrchestratorState.REPLANNING, OrchestratorState.CANCELLED],
     OrchestratorState.EXECUTING: [OrchestratorState.REVIEWING, OrchestratorState.REPLANNING, OrchestratorState.FAILED, OrchestratorState.CANCELLED],
@@ -60,6 +77,9 @@ class WorkUnitStatus(str, Enum):
     FAILED = "FAILED"
     BLOCKED = "BLOCKED"
     SKIPPED = "SKIPPED"
+    # v2 (§7): supervisor merge gate hit a conflict against the integration
+    # branch. Routed to debugger for a resolution attempt by default.
+    MERGE_CONFLICT = "MERGE_CONFLICT"
 
 
 class ReviewVerdict(str, Enum):
@@ -83,14 +103,20 @@ class ApprovalMode(str, Enum):
 
 class EventType(str, Enum):
     RUN_CREATED = "RUN_CREATED"
+    ROSTER_CREATED = "ROSTER_CREATED"
+    ROSTER_APPROVED = "ROSTER_APPROVED"
+    ROSTER_ADJUSTED = "ROSTER_ADJUSTED"
     PLAN_CREATED = "PLAN_CREATED"
     PLAN_APPROVED = "PLAN_APPROVED"
+    MODEL_SELECTED = "MODEL_SELECTED"
     WORK_UNIT_READY = "WORK_UNIT_READY"
     WORK_UNIT_STARTED = "WORK_UNIT_STARTED"
     WORKER_QUESTION = "WORKER_QUESTION"
     ORCHESTRATOR_ANSWER = "ORCHESTRATOR_ANSWER"
     USER_ESCALATION = "USER_ESCALATION"
     WORK_UNIT_COMPLETED = "WORK_UNIT_COMPLETED"
+    WU_MERGED = "WU_MERGED"
+    MERGE_CONFLICT_EVENT = "MERGE_CONFLICT"
     REVIEW_STARTED = "REVIEW_STARTED"
     REVIEW_FAILED = "REVIEW_FAILED"
     TEST_STARTED = "TEST_STARTED"

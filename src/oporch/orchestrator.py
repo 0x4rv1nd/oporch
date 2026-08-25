@@ -16,11 +16,13 @@ from .models import (
     PlannerContextPack,
     PlanResult,
     RunState,
+    TeamRoster,
     WorkerQuestion,
 )
 from .run_state import PersistentRunState, create_run_state
 from .runner import MilestoneRunner, RunnerError
 from .state_machine import StateMachine
+from .team_composer import compose_team
 from .validate import validate_planner_output
 
 CONTEXT_DIR = Path(".opencode-orchestrator") / "context"
@@ -37,6 +39,8 @@ def generate_repo_summary() -> str:
     if target.exists():
         return target.read_text(encoding="utf-8")
 
+    from .redact import filter_sensitive_paths
+
     parts: list[str] = []
     src = Path("src")
     if src.exists():
@@ -49,6 +53,18 @@ def generate_repo_summary() -> str:
     if tests.exists():
         test_files = sorted(tests.rglob("*.py"))
         parts.append(f"Test files: {len(test_files)}")
+
+    # §10: credential-shaped files never enter agent context.
+    config_like = [
+        str(p)
+        for p in Path(".").glob("*")
+        if p.is_file()
+    ]
+    safe_configs = filter_sensitive_paths(config_like)
+    if len(safe_configs) < len(config_like):
+        parts.append(
+            f"[{len(config_like) - len(safe_configs)} sensitive file(s) excluded from scan]"
+        )
 
     readme = Path("README.md")
     if readme.exists():
@@ -91,14 +107,78 @@ class HeadOrchestrator:
             raise RuntimeError("event_log not initialized; call plan_milestone first")
         return self._event_log
 
+    def compose_roster(
+        self,
+        run: RunState,
+        phases: list,
+        repo_summary: str = "",
+    ) -> TeamRoster:
+        """COMPOSING_TEAM stage: propose a dynamic roster for the parsed plan.
+
+        Transitions ANALYZING -> COMPOSING_TEAM, saves the roster to SQLite,
+        then transitions to PLANNING. Roster approval happens at CLI level.
+        """
+        from .db import OporchDB
+        from .constants import EventType as ET
+
+        if self.sm.can_transition(OrchestratorState.COMPOSING_TEAM):
+            self.sm.transition(OrchestratorState.COMPOSING_TEAM)
+            self._update_run_state(run, OrchestratorState.COMPOSING_TEAM)
+
+        try:
+            models_cfg = cfg.load_models()
+            available = list(models_cfg.models.keys())
+        except Exception:
+            available = None
+
+        db = OporchDB()
+        try:
+            roster, _from_agent = compose_team(
+                phases,
+                repo_summary,
+                run_id=run.run_id,
+                executor=self.executor,
+                available_models=available,
+            )
+            db.save_roster(
+                run.run_id,
+                [r.model_dump(mode="json") for r in roster.roles],
+                rationale=roster.rationale,
+            )
+        finally:
+            db.close()
+
+        self.event_log.record(
+            ET.ROSTER_CREATED,
+            details={
+                "roles": roster.role_keys(),
+                "rationale": roster.rationale,
+            },
+        )
+
+        if self.sm.can_transition(OrchestratorState.PLANNING):
+            self.sm.transition(OrchestratorState.PLANNING)
+            self._update_run_state(run, OrchestratorState.PLANNING)
+
+        return roster
+
     def plan_milestone(
         self,
         milestone_id: str,
         objective: str = "",
+        plan_source_path: str | None = None,
     ) -> tuple[AgentOutputResult, PlanResult | WorkerQuestion | None]:
         run = create_run_state(milestone_id, objective)
         self.prs.save_current(run.model_dump(mode="json"))
         self.prs.save_run(run)
+        if plan_source_path:
+            from .db import OporchDB
+
+            db = OporchDB()
+            try:
+                db.upsert_run(run.run_id, plan_source_path=plan_source_path)
+            finally:
+                db.close()
         self._event_log = EventLog(run.run_id)
 
         self.sm.transition(OrchestratorState.ANALYZING)
@@ -106,15 +186,38 @@ class HeadOrchestrator:
 
         repo_summary = generate_repo_summary()
 
-        self.sm.transition(OrchestratorState.PLANNING)
-        self._update_run_state(run, OrchestratorState.PLANNING)
+        # v2: a parsed plan document routes through COMPOSING_TEAM first.
+        phases = []
+        if plan_source_path:
+            from .context_builder import parse_plan_doc
+
+            phases = parse_plan_doc(Path(plan_source_path).read_text(encoding="utf-8"))
+            if phases:
+                roster = self.compose_roster(run, phases, repo_summary=repo_summary)
+                self.event_log.record(
+                    EventType.ROSTER_APPROVED,
+                    details={"roles": roster.role_keys()},
+                )
+            else:
+                self.sm.transition(OrchestratorState.PLANNING)
+                self._update_run_state(run, OrchestratorState.PLANNING)
+        else:
+            self.sm.transition(OrchestratorState.PLANNING)
+            self._update_run_state(run, OrchestratorState.PLANNING)
 
         planner_prompt = _load_planner_prompt()
 
         prd_sections: list[str] = []
-        prd = Path("PRD.md")
-        if prd.exists():
-            prd_sections = [line.strip() for line in prd.read_text(encoding="utf-8").splitlines() if line.startswith("## ")]
+        if phases:
+            prd_sections = [
+                f"Phase {p.number}: {p.title}"
+                + (f" — {p.description}" if p.description else "")
+                for p in phases
+            ]
+        else:
+            prd = Path("PRD.md")
+            if prd.exists():
+                prd_sections = [line.strip() for line in prd.read_text(encoding="utf-8").splitlines() if line.startswith("## ")]
 
         ctx = PlannerContextPack(
             milestone_id=milestone_id,
