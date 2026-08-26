@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Protocol
 from . import config as cfg
 from .constants import AgentRole
@@ -54,6 +55,13 @@ def build_restricted_env(base: dict[str, str] | None = None) -> dict[str, str]:
         ):
             out[key] = value
     return out
+
+
+def estimate_tokens(text: str | None) -> int:
+    """~4 chars/token heuristic (§9: cheap tracking now beats retrofitting)."""
+    if not text:
+        return 0
+    return max(1, len(text) // 4)
 
 
 async def call_executor_async(
@@ -119,7 +127,13 @@ class FakeAgentExecutor:
         task: AgentTask,
         context: ContextPack,
     ) -> AgentResult:
-        return self.run(role, task, context)
+        import time
+
+        started = time.monotonic()
+        result = self.run(role, task, context)
+        if result.duration_ms is None:
+            result.duration_ms = (time.monotonic() - started) * 1000.0
+        return result
 
 
 class OpenCodeAgentExecutor:
@@ -145,15 +159,17 @@ class OpenCodeAgentExecutor:
         context: ContextPack,
     ) -> AgentResult:
         import subprocess
+        import time
 
         key = role_key(role)
         prompt = self._build_prompt(key, task, context)
-        model_id = cfg.resolve_model(key)
+        model_id = task.model_override or cfg.resolve_model(key)
         cmd = [self._cmd, "-p", prompt]
         if model_id:
             cmd += ["-m", model_id]
         cwd = task.working_dir or None
 
+        started = time.monotonic()
         try:
             result = subprocess.run(
                 cmd,
@@ -163,11 +179,16 @@ class OpenCodeAgentExecutor:
                 cwd=cwd,
                 env=self._subprocess_env(),
             )
+            duration_ms = (time.monotonic() - started) * 1000.0
             return AgentResult(
                 role=key,
                 success=result.returncode == 0,
                 output=result.stdout,
                 error=result.stderr if result.returncode != 0 else None,
+                tokens_in=estimate_tokens(prompt),
+                tokens_out=estimate_tokens(result.stdout),
+                duration_ms=duration_ms,
+                model_used=model_id,
             )
         except subprocess.TimeoutExpired:
             return AgentResult(
@@ -175,6 +196,9 @@ class OpenCodeAgentExecutor:
                 success=False,
                 output="",
                 error="Timeout expired",
+                tokens_in=estimate_tokens(prompt),
+                duration_ms=(time.monotonic() - started) * 1000.0,
+                model_used=model_id,
             )
         except FileNotFoundError:
             return AgentResult(
@@ -182,6 +206,7 @@ class OpenCodeAgentExecutor:
                 success=False,
                 output="",
                 error=f"OpenCode command '{self._cmd}' not found",
+                model_used=model_id,
             )
 
     async def run_async(
@@ -208,6 +233,7 @@ class OpenCodeAgentExecutor:
                 cwd=task.working_dir or None,
                 env=self._subprocess_env(),
             )
+            started = time.monotonic()
             try:
                 stdout, stderr = await asyncio.wait_for(
                     proc.communicate(), timeout=EXEC_TIMEOUT_SECONDS
@@ -217,6 +243,9 @@ class OpenCodeAgentExecutor:
                 await proc.wait()
                 return AgentResult(
                     role=key, success=False, output="", error="Timeout expired",
+                    tokens_in=estimate_tokens(prompt),
+                    duration_ms=(time.monotonic() - started) * 1000.0,
+                    model_used=model_id,
                 )
             out = stdout.decode("utf-8", errors="replace")
             err = stderr.decode("utf-8", errors="replace")
@@ -225,6 +254,10 @@ class OpenCodeAgentExecutor:
                 success=proc.returncode == 0,
                 output=out,
                 error=err if proc.returncode != 0 else None,
+                tokens_in=estimate_tokens(prompt),
+                tokens_out=estimate_tokens(out),
+                duration_ms=(time.monotonic() - started) * 1000.0,
+                model_used=model_id,
             )
         except FileNotFoundError:
             return AgentResult(
@@ -232,6 +265,7 @@ class OpenCodeAgentExecutor:
                 success=False,
                 output="",
                 error=f"OpenCode command '{self._cmd}' not found",
+                model_used=model_id,
             )
 
     def _build_prompt(

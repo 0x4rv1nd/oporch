@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from oporch.dashboard import OporchDashboard
+from oporch.dashboard import OporchDashboard, WUDetailScreen
 from oporch.db import OporchDB
 
 pytest.importorskip("textual")
@@ -88,22 +88,43 @@ class TestSnapshotLogic:
         assert "WORK_UNIT_STARTED" in text
 
 
+def _visible_text(app) -> str:
+    """Collect rendered text from every Static in the app."""
+    from textual.widgets import Static
+
+    parts = []
+    for node in app.query(Static):
+        try:
+            parts.append(str(node.content))
+        except Exception:
+            continue
+    return "\n".join(parts)
+
+
 class TestDashboardApp:
     @pytest.mark.asyncio
     async def test_app_renders_roles_and_events(self, seeded_db):
         db, run_id = seeded_db
         app = OporchDashboard(run_id, db=db)
         async with app.run_test(size=(120, 40)) as pilot:
-            app.refresh_from_db()
-            await pilot.pause(0.2)
-            columns = app.query_one("#columns")
-            joined = "\n".join(str(c.content) for c in columns.children)
+            await pilot.pause(0.4)
+            joined = _visible_text(app)
             assert "backend" in joined
             assert "WU-001" in joined and "▶" in joined
             assert "✓" in joined and "WU-002" in joined
             assert "⚡" in joined and "WU-004" in joined
-            events_text = str(app.query_one("#events-inner").content)
-            assert "WORK_UNIT_COMPLETED" in events_text
+            assert "WORK_UNIT_COMPLETED" in joined
+
+    @pytest.mark.asyncio
+    async def test_status_chips_rendered(self, seeded_db):
+        db, run_id = seeded_db
+        app = OporchDashboard(run_id, db=db)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.4)
+            chips = str(app.query_one("#chips").content)
+            assert "done:1" in chips or "completed:1" in chips
+            assert "active:1" in chips
+            assert "conflict:1" in chips
 
     @pytest.mark.asyncio
     async def test_pause_toggle_writes_control_row(self, seeded_db):
@@ -111,28 +132,61 @@ class TestDashboardApp:
         app = OporchDashboard(run_id, db=db)
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.press("p")
-            await pilot.pause(0.1)
+            await pilot.pause(0.2)
             assert db.get_control("pause") == "1"
+            topbar = str(app.query_one("#topbar").content)
+            assert "PAUSED" in topbar
             await pilot.press("p")
-            await pilot.pause(0.1)
+            await pilot.pause(0.2)
             assert db.get_control("pause") == "0"
 
     @pytest.mark.asyncio
-    async def test_detail_drilldown(self, seeded_db):
+    async def test_detail_drilldown_modal(self, seeded_db):
         db, run_id = seeded_db
         app = OporchDashboard(run_id, db=db)
         async with app.run_test(size=(110, 36)) as pilot:
-            await pilot.pause(0.2)
+            await pilot.pause(0.4)
+            before = type(app.screen).__name__
             await pilot.press("d")
+            await pilot.pause(0.3)
+            assert isinstance(app.screen, WUDetailScreen)
+            body = str(app.screen.query_one("#detail-body").content)
+            assert "WU-001" in body
+            assert "Event trail" in body
+            assert "WORK_UNIT_STARTED" in body
+            await pilot.press("escape")
             await pilot.pause(0.2)
-            detail = app.query_one("#detail")
-            assert detail.display is True
-            text = str(detail.content)
-            assert "WU-001" in text
-            assert "Event trail" in text
-            await pilot.press("d")
+            assert type(app.screen).__name__ == before
+
+    @pytest.mark.asyncio
+    async def test_keyboard_navigation_moves_selection(self, seeded_db):
+        db, run_id = seeded_db
+        app = OporchDashboard(run_id, db=db)
+        async with app.run_test(size=(110, 36)) as pilot:
+            await pilot.pause(0.4)
+            first_selected = app._flat[app._cursor]["id"]
+            await pilot.press("j")
             await pilot.pause(0.1)
-            assert detail.display is False
+            second_selected = app._flat[app._cursor]["id"]
+            assert second_selected != first_selected
+            await pilot.press("k")
+            await pilot.pause(0.1)
+            assert app._flat[app._cursor]["id"] == first_selected
+
+    @pytest.mark.asyncio
+    async def test_click_selects_wu_card(self, seeded_db):
+        from oporch.dashboard import WUCard
+
+        db, run_id = seeded_db
+        app = OporchDashboard(run_id, db=db)
+        async with app.run_test(size=(110, 36)) as pilot:
+            await pilot.pause(0.4)
+            cards = list(app.query(WUCard))
+            target = next(c for c in cards if c.wu_id == "WU-002")
+            await pilot.click(target)
+            await pilot.pause(0.2)
+            selected = app._flat[app._cursor]["id"]
+            assert selected == "WU-002"
 
     @pytest.mark.asyncio
     async def test_quit_key(self, seeded_db):

@@ -109,3 +109,66 @@ class WorkUnitGraph:
         return all(
             u.status == WorkUnitStatus.COMPLETED for u in self._units.values()
         )
+
+    def pending_ids(self) -> set[str]:
+        return {
+            uid for uid, u in self._units.items()
+            if u.status not in (
+                WorkUnitStatus.COMPLETED,
+                WorkUnitStatus.FAILED,
+                WorkUnitStatus.SKIPPED,
+            )
+        }
+
+    def split_work_unit(self, wu_id: str) -> list[WorkUnit]:
+        """§11b 'retry_with_narrower_scope': split a WU into two smaller ones.
+
+        Children inherit the original's dependencies and split its
+        acceptance criteria + affected files between them; dependents are
+        rewired to depend on both children. The original is removed.
+        Returns the two new units. Raises if the WU can't be split.
+        """
+        original = self._units.get(wu_id)
+        if original is None:
+            raise WorkUnitGraphError(f"Unknown work unit {wu_id}")
+        if len(original.acceptance_criteria) < 2:
+            raise WorkUnitGraphError(
+                f"{wu_id} has fewer than 2 acceptance criteria; cannot split"
+            )
+
+        criteria = original.acceptance_criteria
+        files = original.files_likely_affected
+        mid_c = len(criteria) // 2
+        mid_f = len(files) // 2 if files else 0
+
+        def child(suffix: str, crit: list[str], fls: list[str]) -> WorkUnit:
+            from .models import WorkUnit as _WU
+
+            return _WU(
+                id=f"{wu_id}{suffix}",
+                title=f"{original.title} ({suffix})",
+                objective=original.objective,
+                dependencies=list(original.dependencies),
+                assigned_role=original.assigned_role,
+                phase=original.phase,
+                acceptance_criteria=crit,
+                files_likely_affected=fls,
+                tests_required=list(original.tests_required),
+                max_attempts=original.max_attempts,
+            )
+
+        part_a = child("a", criteria[:mid_c], files[:mid_f])
+        part_b = child("b", criteria[mid_c:], files[mid_f:] or files[:mid_f])
+
+        # Rewire dependents of the original onto both parts.
+        for unit in self._units.values():
+            if wu_id in unit.dependencies:
+                unit.dependencies = [
+                    d for d in unit.dependencies if d != wu_id
+                ] + [part_a.id, part_b.id]
+
+        del self._units[wu_id]
+        self.add(part_a)
+        self.add(part_b)
+        self.validate()
+        return [part_a, part_b]

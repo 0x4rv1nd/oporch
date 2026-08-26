@@ -14,13 +14,30 @@ from .doctor import run_doctor
 app = typer.Typer(
     name="oporch",
     help="Multi-agent orchestration system for OpenCode",
-    no_args_is_help=True,
+    no_args_is_help=False,
+    invoke_without_command=True,
 )
 memory_app = typer.Typer(help="Durable agent memory (cross-run)")
 app.add_typer(memory_app, name="memory")
 team_app = typer.Typer(help="Dynamic team roster operations")
 app.add_typer(team_app, name="team")
 console = Console()
+
+
+@app.callback(invoke_without_command=True)
+def _main_callback(
+    ctx: typer.Context,
+    executor: str = typer.Option(
+        "opencode", "--executor", "-e",
+        help="Default executor for the REPL session: 'opencode' or 'fake'",
+        hidden=True,
+    ),
+) -> None:
+    """Launch the interactive REPL when no subcommand is given."""
+    if ctx.invoked_subcommand is None:
+        from .repl import launch_repl
+
+        launch_repl(executor_type=executor)
 
 CONFIG_DIR = Path(".opencode-orchestrator") / "config"
 STATE_DIR = Path(".opencode-orchestrator") / "state"

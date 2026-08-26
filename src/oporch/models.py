@@ -23,6 +23,10 @@ class RoleConfig(BaseModel):
     model: str
     fallback: str | None = None
     max_workers: int = 1
+    # §11a: allowed model-tier range for this role. When set, the supervisor
+    # picks the concrete model per-WU within [tier_min, tier_max].
+    tier_min: Literal["fast", "standard", "heavy"] | None = None
+    tier_max: Literal["fast", "standard", "heavy"] | None = None
 
 
 class RolesConfig(BaseModel):
@@ -57,6 +61,19 @@ class SecurityPolicy(BaseModel):
     # STRICT approval mode disables auto-merge entirely and escalates every
     # merge decision to a human.
     strict_disables_auto_merge: bool = True
+    # §7/§10 minimum isolation: give each WU its own git worktree even when
+    # the supervisor merge gate is disabled.
+    use_worktrees: bool = False
+    # §11c: enforce each role's allowed_paths against the actual diff.
+    enforce_allowed_paths: bool = True
+
+
+class SelfHealPolicy(BaseModel):
+    """§11b: recovery strategy ladder instead of a fixed retry count."""
+
+    enabled: bool = False
+    # Max distinct recovery strategies before forced escalation.
+    max_strategies: int = 3
 
 
 class MergeConflictPolicy(BaseModel):
@@ -104,6 +121,16 @@ class PoliciesConfig(BaseModel):
     merge_conflict: MergeConflictPolicy = MergeConflictPolicy()
     security: SecurityPolicy = SecurityPolicy()
     roster_auto_scale: RosterAutoScalePolicy = RosterAutoScalePolicy()
+    # §11b
+    self_heal: SelfHealPolicy = SelfHealPolicy()
+    # §11a/§9: soft token budget per run; supervisor avoids heavy-tier models
+    # once the run's recorded token usage crosses this.
+    model_budget_soft_limit: int = 2_000_000
+    # Domains whose WUs are bumped a tier by default (higher blast radius).
+    high_risk_domains: list[str] = Field(
+        default_factory=lambda: ["db", "db_migration", "auth", "migration",
+                                 "infra", "security"]
+    )
 
 
 class ModelInfo(BaseModel):
@@ -362,6 +389,9 @@ class AgentTask(BaseModel):
     raw_prompt: str | None = None
     # v2 (§7): directory the agent subprocess runs in (per-WU worktree).
     working_dir: str | None = None
+    # §11a: concrete model_id chosen by the supervisor for THIS task;
+    # overrides the per-role static mapping when set.
+    model_override: str | None = None
 
 
 class AgentResult(BaseModel):
@@ -372,6 +402,11 @@ class AgentResult(BaseModel):
     output: str = ""
     error: str | None = None
     claims: list[Claim] = Field(default_factory=list)
+    # §9/§11a cost + model tracking (estimated when the CLI doesn't report).
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    duration_ms: float | None = None
+    model_used: str | None = None
 
 
 class AgentOutputResult(BaseModel):
