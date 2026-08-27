@@ -147,8 +147,6 @@ oporch doctor
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
----
-
 ## 🚀 Quick Start
 
 ```bash
@@ -160,10 +158,10 @@ That's it. Paste your implementation plan and follow the prompts:
 ```
 ╭─ ⚡ oporch ── Multi-Agent Orchestrator ──────────────────────╮
 │  📂 myproject                                                 │
-│  State: IDLE                                                  │
+│  State: IDLE  Head Model: nemotron-ultra                      │
 │                                                               │
 │  Paste your implementation plan below, or type /help          │
-│  Use /quit to exit.                                           │
+│  Use /head-model to switch supervisor, or /quit to exit.      │
 ╰──────────────────────────────────────────────────────────────╯
 
 oporch ❯ ## Phase 1: Database Schema
@@ -186,24 +184,35 @@ oporch ❯ ## Phase 1: Database Schema
 
 🤖 Composing team & generating work units...
 
-🤖 Team: backend x2  db x1  frontend x1  reviewer ✓  tester ✓
+🤖 Head Supervisor Model: nemotron-ultra
+
+Sub-Agent Roster & Assigned Models:
+┌──────────┬───────────────────┬───────────┬─────────┬────────────────────────┐
+│ Role     │ Assigned Model    │ Fallback  │ Workers │ Domains / Scope        │
+├──────────┼───────────────────┼───────────┼─────────┼────────────────────────┤
+│ db       │ mimo-v2.5         │ fast-code │ 1       │ database, db, migration│
+│ backend  │ deepseek-v4-flash │ mimo-v2.5 │ 2       │ api, auth, fastapi     │
+│ frontend │ deepseek-v4-flash │ mimo-v2.5 │ 1       │ ui, react, page        │
+│ reviewer │ nemotron-ultra    │ —         │ 2       │ security & ast review  │
+│ tester   │ deepseek-v4-flash │ —         │ 2       │ testing, regression    │
+└──────────┴───────────────────┴───────────┴─────────┴────────────────────────┘
 
 📋 9 work units proposed:
-┌────────┬────────────────────────┬──────────┬────────┐
-│ ID     │ Title                  │ Role     │ Deps   │
-├────────┼────────────────────────┼──────────┼────────┤
-│ WU-001 │ Create users table     │ db       │ --     │
-│ WU-002 │ Migration script       │ db       │ WU-001 │
-│ WU-003 │ POST /register         │ backend  │ WU-001 │
-│ WU-004 │ POST /login            │ backend  │ WU-001 │
-│ WU-005 │ GET /me                │ backend  │ WU-004 │
-│ WU-006 │ JWT middleware         │ backend  │ WU-004 │
-│ WU-007 │ Login page             │ frontend │ WU-004 │
-│ WU-008 │ JWT storage            │ frontend │ WU-006 │
-│ WU-009 │ Route guards           │ frontend │ WU-008 │
-└────────┴────────────────────────┴──────────┴────────┘
+┌────────┬────────────────────────┬───────────────┬──────────────┐
+│ ID     │ Title                  │ Assigned Role │ Dependencies │
+├────────┼────────────────────────┼───────────────┼──────────────┤
+│ WU-001 │ Create users table     │ db            │ --           │
+│ WU-002 │ Migration script       │ db            │ WU-001       │
+│ WU-003 │ POST /register         │ backend       │ WU-001       │
+│ WU-004 │ POST /login            │ backend       │ WU-001       │
+│ WU-005 │ GET /me                │ backend       │ WU-004       │
+│ WU-006 │ JWT middleware         │ backend       │ WU-004       │
+│ WU-007 │ Login page             │ frontend      │ WU-004       │
+│ WU-008 │ JWT storage            │ frontend      │ WU-006       │
+│ WU-009 │ Route guards           │ frontend      │ WU-008       │
+└────────┴────────────────────────┴───────────────┴──────────────┘
 
-Approve and start building? [Y/n] y
+Approve and build? [Yes / no / customize sub-models / head-model]: y
 ✓ Plan approved
 ▶ Executing...  (type /status or /view for progress)
 ```
@@ -306,20 +315,26 @@ oporch ❯ /proxy-stats
 
 `oporch` features a tiered intelligence architecture separating high-level supervision from specialized sub-agent execution.
 
-### Role Hierarchy
+### How Model Assignment Works
+
+1. **You choose the Head Supervisor Model** (e.g. `nemotron-ultra`, `claude-3-7-sonnet`, `deepseek-v4-flash`).
+2. **The Head Model analyzes the plan and assigns sub-models** for all roles (builders, reviewers, testers, debuggers) based on task domain and complexity.
+3. **You have complete control to customize**: During plan approval, press `c` or use `/sub-models` to override any sub-agent's model before execution.
 
 ```
-                      ┌─────────────────────────┐
-                      │    HEAD SUPERVISOR      │
-                      │  (nemotron-ultra / heavy)│
-                      └────────────┬────────────┘
-                                   │
-      ┌────────────────┬───────────┴────────────┬────────────────┐
-      ▼                ▼                        ▼                ▼
-┌───────────┐    ┌───────────┐            ┌───────────┐    ┌───────────┐
-│  PLANNER  │    │  BUILDERS │            │ REVIEWER  │    │  TESTER   │
-│  (fast)   │    │(fast/std) │            │  (heavy)  │    │  (heavy)  │
-└───────────┘    └───────────┘            └───────────┘    └───────────┘
+                      ┌─────────────────────────────────────────┐
+                      │          HEAD SUPERVISOR MODEL          │
+                      │ (nemotron-ultra / claude-3-7-sonnet)    │
+                      │  Analyzes plan & assigns sub-models     │
+                      └────────────────────┬────────────────────┘
+                                           │
+       ┌────────────────────────┬──────────┴─────────────┬────────────────────────┐
+       ▼                        ▼                        ▼                        ▼
+┌──────────────┐         ┌──────────────┐         ┌──────────────┐         ┌──────────────┐
+│  DB AGENT    │         │  UI BUILDER  │         │   REVIEWER   │         │    TESTER    │
+│  (mimo-v2.5) │         │ (deepseek-v4)│         │(nemotron-3)  │         │ (deepseek-v4)│
+│ complex SQL  │         │  fast coder  │         │  heavy gate  │         │  validation  │
+└──────────────┘         └──────────────┘         └──────────────┘         └──────────────┘
 ```
 
 ### Model Tiers
@@ -329,15 +344,23 @@ Models are grouped into 3 operational tiers in `models.yaml`:
 | Tier | Role Type | Purpose | Default Example |
 |------|-----------|---------|-----------------|
 | **`fast`** | Builder, Planner, Researcher | High throughput, quick iteration, code generation | `deepseek-v4-flash` / `gpt-4o-mini` |
-| **`standard`** | Debugger, Architect | Balanced reasoning, deep context diagnostics | `mimo-v2.5` / `claude-3-5-sonnet` |
+| **`standard`** | Debugger, Architect, DB Specialist | Balanced reasoning, deep context diagnostics | `mimo-v2.5` / `claude-3-5-sonnet` |
 | **`heavy`** | Supervisor, Reviewer, Tester | Adversarial verification, AST checks, merge governance | `nemotron-ultra` / `claude-3-7-sonnet` |
 
-### Dynamic Model Selection (§11a)
+### Selecting Models in the REPL
 
-`SupervisorModelSelector` automatically selects or upgrades models based on runtime signals:
-- **Scope complexity**: Number of files affected + acceptance criteria density
-- **Retry bumps**: If a work unit fails on attempt 1 with a `fast` model, attempt 2/3 automatically escalates to `standard` or `heavy`
-- **Soft budget de-scoping**: If token usage nears configured limits, routine tasks gracefully fall back to `fast` models while preserving `heavy` models for Reviewer and Supervisor gates
+- **Switch Head Model**:
+  ```
+  oporch ❯ /head-model
+  ```
+- **Customize Sub-Agent Models**:
+  ```
+  oporch ❯ /sub-models
+  ```
+- **During Plan Approval**:
+  ```
+  Approve and build? [Yes / no / customize sub-models / head-model]: c
+  ```
 
 ### Customizing Models (`roles.yaml` & `models.yaml`)
 
