@@ -116,6 +116,50 @@ CREATE TABLE IF NOT EXISTS control (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- ── Codebase knowledge graph (codebase_index.py) ─────────────────────────────
+CREATE TABLE IF NOT EXISTS code_symbols (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project TEXT NOT NULL,
+    filepath TEXT NOT NULL,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    line_start INTEGER,
+    line_end INTEGER,
+    parent TEXT,
+    docstring TEXT,
+    language TEXT DEFAULT 'python',
+    UNIQUE(project, filepath, name, kind, line_start)
+);
+CREATE INDEX IF NOT EXISTS idx_sym_project_name ON code_symbols(project, name);
+CREATE INDEX IF NOT EXISTS idx_sym_filepath ON code_symbols(project, filepath);
+
+CREATE TABLE IF NOT EXISTS code_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project TEXT NOT NULL,
+    caller_file TEXT NOT NULL,
+    caller_name TEXT NOT NULL,
+    callee_name TEXT NOT NULL,
+    line INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_calls_callee ON code_calls(project, callee_name);
+CREATE INDEX IF NOT EXISTS idx_calls_caller ON code_calls(project, caller_name);
+
+CREATE TABLE IF NOT EXISTS code_imports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project TEXT NOT NULL,
+    filepath TEXT NOT NULL,
+    module TEXT NOT NULL,
+    names TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_imports_project ON code_imports(project, filepath);
+
+CREATE TABLE IF NOT EXISTS code_file_mtimes (
+    project TEXT NOT NULL,
+    filepath TEXT NOT NULL,
+    mtime REAL NOT NULL,
+    PRIMARY KEY (project, filepath)
+);
 """
 
 
@@ -632,6 +676,134 @@ class OporchDB:
     def get_control(self, key: str) -> str | None:
         rows = self._query("SELECT value FROM control WHERE key = ?", (key,))
         return rows[0]["value"] if rows else None
+
+    # ------------------------------------------------------------------
+    # codebase index (code_symbols / code_calls / code_imports)
+    # ------------------------------------------------------------------
+    def save_symbols(self, project: str, symbols: list[Any]) -> None:
+        """Bulk-insert Symbol dataclass instances (or dicts) into code_symbols."""
+        for s in symbols:
+            if hasattr(s, "__dataclass_fields__"):
+                name, kind, fp = s.name, s.kind, s.filepath
+                ls, le = s.line_start, s.line_end
+                parent, doc, lang = s.parent, s.docstring, s.language
+            else:
+                name, kind, fp = s["name"], s["kind"], s["filepath"]
+                ls, le = s.get("line_start"), s.get("line_end")
+                parent, doc, lang = s.get("parent"), s.get("docstring"), s.get("language", "python")
+            try:
+                self._execute(
+                    """
+                    INSERT OR IGNORE INTO code_symbols
+                        (project, filepath, name, kind, line_start, line_end, parent, docstring, language)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (project, fp, name, kind, ls, le, parent, doc, lang),
+                )
+            except Exception:
+                pass
+
+    def save_calls(self, project: str, calls: list[Any]) -> None:
+        """Bulk-insert CallSite dataclass instances into code_calls."""
+        for c in calls:
+            if hasattr(c, "__dataclass_fields__"):
+                cf, cn, callee, line = c.caller_file, c.caller_name, c.callee_name, c.line
+            else:
+                cf, cn, callee, line = c["caller_file"], c["caller_name"], c["callee_name"], c.get("line", 0)
+            try:
+                self._execute(
+                    "INSERT INTO code_calls (project, caller_file, caller_name, callee_name, line)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (project, cf, cn, callee, line),
+                )
+            except Exception:
+                pass
+
+    def save_imports(self, project: str, imports: list[Any]) -> None:
+        """Bulk-insert ImportRecord dataclass instances into code_imports."""
+        for imp in imports:
+            if hasattr(imp, "__dataclass_fields__"):
+                fp, mod, names = imp.filepath, imp.module, imp.names
+            else:
+                fp, mod, names = imp["filepath"], imp["module"], imp.get("names", "")
+            try:
+                self._execute(
+                    "INSERT INTO code_imports (project, filepath, module, names) VALUES (?, ?, ?, ?)",
+                    (project, fp, mod, names),
+                )
+            except Exception:
+                pass
+
+    def search_symbols(
+        self,
+        project: str,
+        pattern: str,
+        kind: str | None = None,
+        filepath: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM code_symbols WHERE project = ? AND name REGEXP ?"
+        params: list[Any] = [project, pattern]
+        if kind:
+            sql += " AND kind = ?"
+            params.append(kind)
+        if filepath:
+            sql += " AND filepath = ?"
+            params.append(filepath)
+        sql += " ORDER BY filepath, line_start LIMIT ?"
+        params.append(limit)
+        try:
+            # SQLite has no REGEXP by default — use LIKE fallback
+            rows = self._query(
+                sql.replace("REGEXP ?", "LIKE ?").replace(pattern, f"%{pattern}%"),
+                params,
+            )
+        except Exception:
+            rows = []
+        return [dict(r) for r in rows]
+
+    def get_callers(self, project: str, name: str, limit: int = 20) -> list[dict[str, Any]]:
+        rows = self._query(
+            "SELECT * FROM code_calls WHERE project = ? AND callee_name = ?"
+            " ORDER BY caller_file, line LIMIT ?",
+            (project, name, limit),
+        )
+        return [dict(r) for r in rows]
+
+    def all_calls(self, project: str) -> list[dict[str, Any]]:
+        rows = self._query(
+            "SELECT * FROM code_calls WHERE project = ? LIMIT 50000",
+            (project,),
+        )
+        return [dict(r) for r in rows]
+
+    def clear_index(self, project: str) -> None:
+        """Delete all index data for a project (full re-index)."""
+        for table in ("code_symbols", "code_calls", "code_imports", "code_file_mtimes"):
+            self._execute(f"DELETE FROM {table} WHERE project = ?", (project,))
+
+    def clear_file_index(self, project: str, filepath: str) -> None:
+        """Delete index entries for a single file before re-indexing it."""
+        for table in ("code_symbols", "code_calls", "code_imports"):
+            self._execute(
+                f"DELETE FROM {table} WHERE project = ? AND "
+                f"{'filepath' if table != 'code_calls' else 'caller_file'} = ?",
+                (project, filepath),
+            )
+
+    def record_file_mtime(self, project: str, filepath: str, mtime: float) -> None:
+        self._execute(
+            "INSERT INTO code_file_mtimes (project, filepath, mtime) VALUES (?, ?, ?)"
+            " ON CONFLICT(project, filepath) DO UPDATE SET mtime = excluded.mtime",
+            (project, filepath, mtime),
+        )
+
+    def get_file_mtime(self, project: str, filepath: str) -> float | None:
+        rows = self._query(
+            "SELECT mtime FROM code_file_mtimes WHERE project = ? AND filepath = ?",
+            (project, filepath),
+        )
+        return rows[0]["mtime"] if rows else None
 
 
 def migrate_legacy_files(db: OporchDB | None = None) -> dict[str, int]:

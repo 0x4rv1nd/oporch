@@ -199,6 +199,8 @@ class ContextPack(BaseModel):
     failure_evidence: str | None = None
     # v2 (§4): top-K agent_memory rows recalled for this role/project.
     project_memory: list[str] = Field(default_factory=list)
+    # v2.1: code index summary injected by codebase_index.enrich_context_with_index()
+    index_summary: str | None = None
 
 
 class WorkUnit(BaseModel):

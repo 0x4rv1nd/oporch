@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Protocol
+from typing import Protocol, Any
 from . import config as cfg
 from .constants import AgentRole
 from .models import AgentTask, AgentResult, ContextPack
@@ -306,4 +306,6 @@ class OpenCodeAgentExecutor:
                 "Lessons from previous runs on this project — respect them:\n"
                 + "\n".join(f"- {m}" for m in context.project_memory)
             )
+        if context.index_summary:
+            parts.append(context.index_summary)
         return "\n\n".join(parts)

@@ -59,6 +59,13 @@ _SLASH_COMMANDS: dict[str, str] = {
     "/logs [N]": "Show last N structured events",
     "/cancel": "Cancel the current run",
     "/doctor": "Run environment health checks",
+    # ─ Codebase index ───────────────────────────────────────────
+    "/index": "Force full re-index of codebase (runs automatically on startup)",
+    "/search <pat>": "Search indexed symbols by regex/substring",
+    "/callers <name>": "Show all call sites that call <name>",
+    "/arch": "Show codebase architecture summary",
+    # ─ Proxy stats ────────────────────────────────────────────
+    "/proxy-stats": "Show rate-limit retry/fallback and token usage stats",
     "/help": "Show this help",
     "/quit": "Exit oporch",
     "/q": "Exit oporch",
@@ -193,6 +200,30 @@ class OporchREPL:
             from .cli import _write_default_models
 
             _write_default_models()
+        # Start background codebase indexer (incremental — only changed files)
+        self._start_background_index()
+
+    def _start_background_index(self) -> None:
+        """Kick off incremental indexing in a background daemon thread."""
+        def _bg() -> None:
+            try:
+                from .db import OporchDB
+                from .codebase_index import CodebaseIndexer
+                db = OporchDB()
+                indexer = CodebaseIndexer(db)
+                # Register as global indexer so commands can access it
+                import oporch.codebase_index as _ci
+                _ci._global_indexer = indexer
+                counts = indexer.index_project(full=False)
+                if counts["files"] > 0:
+                    self.console.print(
+                        f"[dim]⚙ Index updated: {counts['files']} files, "
+                        f"{counts['symbols']} symbols[/dim]"
+                    )
+            except Exception:
+                pass  # Indexing is best-effort; never crash the REPL
+        t = threading.Thread(target=_bg, daemon=True, name="oporch-indexer")
+        t.start()
 
     # ----- banner ----------------------------------------------------------
 
@@ -244,6 +275,13 @@ class OporchREPL:
             "/logs": self._cmd_logs,
             "/cancel": self._cmd_cancel,
             "/doctor": self._cmd_doctor,
+            # codebase index commands
+            "/index": self._cmd_index,
+            "/search": self._cmd_search,
+            "/callers": self._cmd_callers,
+            "/arch": self._cmd_arch,
+            # proxy stats
+            "/proxy-stats": self._cmd_proxy_stats,
             "/help": self._cmd_help,
             "/quit": self._cmd_quit,
             "/q": self._cmd_quit,
@@ -916,9 +954,11 @@ class OporchREPL:
                 from .executor import FakeAgentExecutor, OpenCodeAgentExecutor
                 from .orchestrator import HeadOrchestrator, OrchestratorError
                 from .run_state import PersistentRunState
+                from .smart_proxy import RetryingOpenCodeExecutor
 
                 if self.executor_type == "opencode":
-                    executor = OpenCodeAgentExecutor()
+                    base_executor = OpenCodeAgentExecutor()
+                    executor = RetryingOpenCodeExecutor(base_executor)
                 else:
                     executor = FakeAgentExecutor()
 
@@ -953,6 +993,163 @@ class OporchREPL:
 
         self._bg_thread = threading.Thread(target=_worker, daemon=True)
         self._bg_thread.start()
+
+    # ======================================================================
+    # Codebase index commands
+    # ======================================================================
+
+    def _cmd_index(self, arg: str) -> None:
+        """/index [--full] — Re-index the codebase."""
+        full = "--full" in arg or "-f" in arg
+        self.console.print(
+            f"[dim]⚙ {'Full re-index' if full else 'Incremental index'} started...[/dim]"
+        )
+        try:
+            from .db import OporchDB
+            from .codebase_index import CodebaseIndexer
+            import oporch.codebase_index as _ci
+
+            db = OporchDB()
+            indexer = CodebaseIndexer(db)
+            _ci._global_indexer = indexer
+            counts = indexer.index_project(full=full)
+            self.console.print(
+                f"[green]✓ Index complete:[/green] "
+                f"{counts['files']} files  "
+                f"{counts['symbols']} symbols  "
+                f"{counts['calls']} call sites  "
+                f"{counts['imports']} imports"
+            )
+        except Exception as exc:
+            self.console.print(f"[red]Index error:[/red] {exc}")
+
+    def _cmd_search(self, arg: str) -> None:
+        """/search <pattern> — Search indexed symbols."""
+        if not arg:
+            self.console.print("[yellow]Usage:[/yellow] /search <pattern>")
+            return
+        try:
+            import oporch.codebase_index as _ci
+            from .db import OporchDB
+            from pathlib import Path as _P
+
+            indexer = _ci._global_indexer
+            if indexer is None:
+                db = OporchDB()
+                indexer = _ci.CodebaseIndexer(db)
+                _ci._global_indexer = indexer
+
+            results = indexer.search_symbols(arg, limit=30)
+            if not results:
+                self.console.print(f"[dim]No symbols matching '{arg}'[/dim]")
+                return
+
+            table = Table(title=f"Symbols matching '{arg}'", show_header=True)
+            table.add_column("Kind", style="cyan", width=10)
+            table.add_column("Name", style="white bold")
+            table.add_column("File", style="dim")
+            table.add_column("Line", justify="right", style="dim")
+            table.add_column("Parent", style="dim")
+            for r in results:
+                fp = _P(r.get("filepath", "")).name
+                table.add_row(
+                    r.get("kind", ""),
+                    r.get("name", ""),
+                    fp,
+                    str(r.get("line_start", "")),
+                    r.get("parent") or "",
+                )
+            self.console.print(table)
+        except Exception as exc:
+            self.console.print(f"[red]Search error:[/red] {exc}")
+
+    def _cmd_callers(self, arg: str) -> None:
+        """/callers <name> — Show who calls a function."""
+        if not arg:
+            self.console.print("[yellow]Usage:[/yellow] /callers <function_name>")
+            return
+        try:
+            import oporch.codebase_index as _ci
+            from .db import OporchDB
+            from pathlib import Path as _P
+
+            indexer = _ci._global_indexer
+            if indexer is None:
+                db = OporchDB()
+                indexer = _ci.CodebaseIndexer(db)
+                _ci._global_indexer = indexer
+
+            results = indexer.get_callers(arg.strip(), limit=30)
+            if not results:
+                self.console.print(f"[dim]No recorded callers for '{arg}'[/dim]")
+                return
+
+            table = Table(title=f"Callers of '{arg}'", show_header=True)
+            table.add_column("Caller", style="white bold")
+            table.add_column("File", style="dim")
+            table.add_column("Line", justify="right", style="dim")
+            for r in results:
+                fp = _P(r.get("caller_file", "")).name
+                table.add_row(r.get("caller_name", ""), fp, str(r.get("line", "")))
+            self.console.print(table)
+        except Exception as exc:
+            self.console.print(f"[red]Callers error:[/red] {exc}")
+
+    def _cmd_arch(self, arg: str) -> None:
+        """/arch — Show project architecture summary."""
+        try:
+            import oporch.codebase_index as _ci
+            from .db import OporchDB
+
+            indexer = _ci._global_indexer
+            if indexer is None:
+                db = OporchDB()
+                indexer = _ci.CodebaseIndexer(db)
+                _ci._global_indexer = indexer
+
+            arch = indexer.get_architecture()
+            table = Table(title="📐 Architecture Summary", show_header=False)
+            table.add_column("Key", style="cyan")
+            table.add_column("Value", style="white")
+            table.add_row("Files", str(arch.total_files))
+            table.add_row("Symbols", str(arch.total_symbols))
+            table.add_row("Languages", ", ".join(
+                f"{k}:{v}" for k, v in sorted(arch.languages.items())
+            ))
+            table.add_row("Top modules", "\n".join(arch.top_modules[:5]))
+            table.add_row("Entry points", "\n".join(arch.entry_points) or "—")
+            table.add_row("Hotspot functions", "\n".join(
+                f"{name} ({n} calls)" for name, n in arch.hotspots[:5]
+            ) or "—")
+            table.add_row("Classes", ", ".join(arch.classes[:15]) or "—")
+            self.console.print(table)
+        except Exception as exc:
+            self.console.print(f"[red]Arch error:[/red] {exc}")
+
+    # ======================================================================
+    # Proxy stats command
+    # ======================================================================
+
+    def _cmd_proxy_stats(self, arg: str) -> None:
+        """/proxy-stats — Show built-in proxy rate-limit and token usage stats."""
+        try:
+            from .smart_proxy import proxy_stats, headroom_running
+
+            if headroom_running():
+                self.console.print(
+                    "[cyan]ℹ Headroom proxy active on :8787 — "
+                    "oporch built-in retry proxy is deferred.[/cyan]"
+                )
+                return
+            if proxy_stats.is_empty():
+                self.console.print("[dim]No proxy activity yet (no agents have run this session).[/dim]")
+                return
+            self.console.print(proxy_stats.as_rich_table())
+        except Exception as exc:
+            self.console.print(f"[red]Proxy stats error:[/red] {exc}")
+
+
+
 
 
 # ---------------------------------------------------------------------------

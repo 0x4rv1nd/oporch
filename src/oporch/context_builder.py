@@ -124,12 +124,27 @@ def build_builder_context(
     prd_sections: list[str] | None = None,
     architecture_constraints: list[str] | None = None,
     dependency_outputs: list[str] | None = None,
+    db: Any | None = None,
+    project: str | None = None,
 ) -> ContextPack:
     """Build context for the Builder role.
 
     Builder receives: work unit info, relevant files, relevant PRD sections,
-    architecture constraints, accepted dependency outputs.
+    architecture constraints, accepted dependency outputs, and (when the
+    codebase index is available) a compact AST/call-graph summary.
     """
+    index_summary: str | None = None
+    if db is not None and work_unit.files_likely_affected:
+        try:
+            from .codebase_index import enrich_context_with_index
+            proj = project or str(Path.cwd())
+            index_summary = enrich_context_with_index(
+                db, proj,
+                work_unit.files_likely_affected,
+                work_unit.acceptance_criteria,
+            )
+        except Exception:
+            pass
     return ContextPack(
         work_unit_id=work_unit.id,
         relevant_prd_sections=prd_sections or [],
@@ -137,6 +152,7 @@ def build_builder_context(
         architecture_constraints=architecture_constraints or [],
         dependency_outputs=dependency_outputs or [],
         acceptance_criteria=work_unit.acceptance_criteria,
+        index_summary=index_summary,
     )
 
 
