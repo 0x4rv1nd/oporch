@@ -80,29 +80,52 @@ No flags. No multi-step commands. Just paste and build.
 
 ---
 
-## 📦 Installation Guide
+## 📦 Installation
+
+### One-line Install (Recommended)
+
+**macOS / Linux:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/0x4rv1nd/oporch/master/install.sh | bash
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/0x4rv1nd/oporch/master/install.ps1 | iex
+```
+
+The script auto-detects `uv` → `pipx` → `pip` and picks the best one.
+
+---
+
+### Manual Install — pick your preferred tool
+
+```bash
+# ① uv (fastest — recommended if you have it)
+uv tool install oporch
+
+# ② pipx (best for CLI tools — isolated, no env conflicts)
+pipx install oporch
+
+# ③ pip (standard)
+pip install oporch
+```
+
+### From Source (dev / contribute)
+
+```bash
+git clone https://github.com/0x4rv1nd/oporch.git
+cd oporch
+pip install -e ".[dev]"   # installs with pytest, ruff, mypy extras
+```
 
 ### Prerequisites
 
-- **Python 3.12+**
-- **Git** (for worktree and branch isolation)
-- **[OpenCode CLI](https://opencode.ai)** (`opencode`)
+- **Python 3.12+** — [python.org](https://python.org)
+- **[OpenCode CLI](https://opencode.ai)** — `opencode` must be in PATH
+- **Git** — for worktree isolation per work unit
 
-### Standard Installation
-
-```bash
-# Install via pip
-pip install oporch
-
-# Or install from source
-git clone https://github.com/0x4rv1nd/oporch.git
-cd oporch
-pip install -e .
-```
-
-### Verification & Health Check
-
-Run the built-in diagnostic tool to verify that your environment, OpenCode CLI, Git, and default configurations are in order:
+### Verify the install
 
 ```bash
 oporch doctor
