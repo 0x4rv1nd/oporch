@@ -23,8 +23,12 @@
 ## Table of Contents
 
 - [What is oporch?](#-what-is-oporch)
+- [Installation Guide](#-installation-guide)
 - [Quick Start](#-quick-start)
 - [Interactive Commands](#-interactive-commands)
+- [Supervisor & Model Selection](#-supervisor--model-selection)
+- [Headroom Proxy Integration](#-headroom-proxy-integration-context-compression)
+- [Codebase-Memory MCP Integration](#-codebase-memory-mcp-integration-knowledge-graph)
 - [Architecture](#-architecture)
 - [Data Flow & Lifecycle](#-data-flow--lifecycle)
 - [State Machine](#-state-machine)
@@ -34,7 +38,6 @@
 - [Dynamic Team Composition](#-dynamic-team-composition)
 - [Parallel Execution Engine](#-parallel-execution-engine)
 - [Git Isolation & Merge Gate](#-git-isolation--merge-gate)
-- [Supervisor Intelligence](#-supervisor-intelligence)
 - [Agent Memory](#-agent-memory)
 - [Security](#-security)
 - [Live Dashboard (TUI)](#-live-dashboard-tui)
@@ -68,6 +71,7 @@ No flags. No multi-step commands. Just paste and build.
 | **Paste and go** | Interactive REPL: paste a plan, team is composed, agents execute |
 | **One orchestrator, many agents** | `HeadOrchestrator` manages state, routing, retries, and escalation |
 | **Dynamic teams** | Roster is sized per-plan, not a fixed enum |
+| **Supervisor intelligence** | Dynamic model tier selection, self-healing recovery, and merge gate |
 | **Parallel execution** | Asyncio dispatcher with per-role semaphore concurrency |
 | **Git isolation** | One worktree per work unit — agents never share a working directory |
 | **Evidence-gated completion** | Review + test + supervisor merge must all pass before `COMPLETED` |
@@ -76,10 +80,50 @@ No flags. No multi-step commands. Just paste and build.
 
 ---
 
+## 📦 Installation Guide
+
+### Prerequisites
+
+- **Python 3.12+**
+- **Git** (for worktree and branch isolation)
+- **[OpenCode CLI](https://opencode.ai)** (`opencode`)
+
+### Standard Installation
+
+```bash
+# Install via pip
+pip install oporch
+
+# Or install from source
+git clone https://github.com/0x4rv1nd/oporch.git
+cd oporch
+pip install -e .
+```
+
+### Verification & Health Check
+
+Run the built-in diagnostic tool to verify that your environment, OpenCode CLI, Git, and default configurations are in order:
+
+```bash
+oporch doctor
+```
+
+```
+┌─────────────────────────── Environment Health Check ───────────────────────────┐
+│ ✓ Python 3.12+ detected                                                        │
+│ ✓ OpenCode CLI available                                                       │
+│ ✓ Git repository detected                                                      │
+│ ✓ Default configs initialized (.opencode-orchestrator/config)                  │
+│ ✓ Model mappings resolved in models.yaml                                       │
+│ ✓ SQLite database ready (WAL mode)                                             │
+└────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## 🚀 Quick Start
 
 ```bash
-pip install oporch
 oporch                    # opens the interactive session
 ```
 
@@ -136,8 +180,6 @@ Approve and start building? [Y/n] y
 ▶ Executing...  (type /status or /view for progress)
 ```
 
-**Requirements:** Python 3.12+, [opencode](https://opencode.ai) CLI, git
-
 ---
 
 ## 💬 Interactive Commands
@@ -185,13 +227,155 @@ Everything happens inside the REPL. Type `/` to see commands:
 | `/help` | Show all available commands |
 | `/quit` or `/q` | Exit oporch |
 
-### Input Handling
+---
 
-- **Multi-line paste**: Accumulates lines until double-Enter or `--end`
-- **Phase detection**: Parses `## Phase N: Title` headers (or generic `## Title`)
-- **Fallback**: If no phases detected, treats first line as a single objective
-- **State-aware prompt**: Shows `[EXECUTING] 8f3a21c4 ❯` during runs
-- **Background execution**: REPL stays responsive — check progress anytime
+## 🧠 Supervisor & Model Selection
+
+`oporch` features a tiered intelligence architecture separating high-level supervision from specialized sub-agent execution.
+
+### Role Hierarchy
+
+```
+                      ┌─────────────────────────┐
+                      │    HEAD SUPERVISOR      │
+                      │  (nemotron-ultra / heavy)│
+                      └────────────┬────────────┘
+                                   │
+      ┌────────────────┬───────────┴────────────┬────────────────┐
+      ▼                ▼                        ▼                ▼
+┌───────────┐    ┌───────────┐            ┌───────────┐    ┌───────────┐
+│  PLANNER  │    │  BUILDERS │            │ REVIEWER  │    │  TESTER   │
+│  (fast)   │    │(fast/std) │            │  (heavy)  │    │  (heavy)  │
+└───────────┘    └───────────┘            └───────────┘    └───────────┘
+```
+
+### Model Tiers
+
+Models are grouped into 3 operational tiers in `models.yaml`:
+
+| Tier | Role Type | Purpose | Default Example |
+|------|-----------|---------|-----------------|
+| **`fast`** | Builder, Planner, Researcher | High throughput, quick iteration, code generation | `deepseek-v4-flash` / `gpt-4o-mini` |
+| **`standard`** | Debugger, Architect | Balanced reasoning, deep context diagnostics | `mimo-v2.5` / `claude-3-5-sonnet` |
+| **`heavy`** | Supervisor, Reviewer, Tester | Adversarial verification, AST checks, merge governance | `nemotron-ultra` / `claude-3-7-sonnet` |
+
+### Dynamic Model Selection (§11a)
+
+`SupervisorModelSelector` automatically selects or upgrades models based on runtime signals:
+- **Scope complexity**: Number of files affected + acceptance criteria density
+- **Retry bumps**: If a work unit fails on attempt 1 with a `fast` model, attempt 2/3 automatically escalates to `standard` or `heavy`
+- **Soft budget de-scoping**: If token usage nears configured limits, routine tasks gracefully fall back to `fast` models while preserving `heavy` models for Reviewer and Supervisor gates
+
+### Customizing Models (`roles.yaml` & `models.yaml`)
+
+You can map any provider or model supported by OpenCode:
+
+```yaml
+# .opencode-orchestrator/config/models.yaml
+models:
+  fast-coder:
+    provider: "deepseek"
+    model_id: "opencode/deepseek-v4-flash-free"
+    tier: "fast"
+  lead-reviewer:
+    provider: "anthropic"
+    model_id: "anthropic/claude-3-7-sonnet"
+    tier: "heavy"
+```
+
+```yaml
+# .opencode-orchestrator/config/roles.yaml
+roles:
+  builder:
+    model: "fast-coder"
+    fallback: "deepseek-v4-flash"
+    max_workers: 3
+  supervisor:
+    model: "lead-reviewer"
+    fallback: "nemotron-ultra"
+    max_workers: 1
+```
+
+---
+
+## 🗜️ Headroom Proxy Integration (Context Compression)
+
+When running multi-agent orchestrations with dozens of work units, tool outputs, test logs, and git diffs can rapidly consume LLM context and escalate token costs.
+
+**[Headroom](https://github.com/headroomlabs-ai/headroom)** is an open-source local context compression layer designed specifically for AI coding agents.
+
+### Why Headroom + oporch?
+
+- **20–90% token reduction**: Compresses large JSON payloads, test logs, AST trees, and long files before they reach the LLM.
+- **Output token reduction**: Shapes model verbosity and dials down reasoning effort on routine file checks while preserving full depth for hard debugging.
+- **Zero code changes**: Sits as a transparent local proxy for OpenCode.
+
+### How to use oporch with Headroom
+
+#### Option A: One-Command Wrapper (Recommended)
+
+Wrap your OpenCode session before launching oporch:
+
+```bash
+# 1. Install Headroom
+pip install "headroom-ai[all]"
+
+# 2. Wrap OpenCode with Headroom proxy
+headroom wrap opencode
+
+# 3. Launch oporch in your project
+oporch
+```
+
+#### Option B: Standalone Proxy
+
+```bash
+# Start Headroom proxy on port 8787 with output shaping
+export HEADROOM_OUTPUT_SHAPER=1
+headroom proxy --port 8787
+
+# In your project terminal, run oporch (OpenCode will route through localhost:8787)
+oporch
+```
+
+You can view live token savings anytime with:
+```bash
+headroom dashboard
+```
+
+---
+
+## 🗺️ Codebase-Memory MCP Integration (Knowledge Graph)
+
+Instead of forcing agents to run dozens of blind `grep`, `find`, and `cat` commands across the codebase, oporch integrates seamlessly with **[codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp)**.
+
+### Why Codebase-Memory MCP?
+
+- **Instant AST Knowledge Graph**: Indexes the entire repository into functions, classes, routes, and call chains using 158 Tree-Sitter grammars in milliseconds.
+- **99.2% fewer tokens**: Structural queries (e.g. `trace_path`, `search_graph`) consume ~3,400 tokens compared to ~412,000 tokens for manual file exploration.
+- **No hallucinated imports**: Agents know exact call paths and type hierarchies before generating code.
+
+### Installation & Setup
+
+**Windows (PowerShell):**
+```powershell
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/install.ps1 -OutFile install.ps1
+Unblock-File .\install.ps1
+.\install.ps1
+```
+
+**macOS / Linux:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/install.sh | bash
+```
+
+Once installed, OpenCode and oporch agents automatically leverage MCP graph tools:
+- `search_graph`: Find functions, classes, routes by regex pattern
+- `trace_path`: Trace incoming callers and outgoing call chains
+- `get_architecture`: Instant high-level project summary and service boundaries
+- `detect_changes`: Impact analysis of modified files against dependent symbols
+
+Explore the 3D interactive knowledge graph at `http://localhost:9749`.
 
 ---
 
@@ -373,112 +557,6 @@ Auto-created on first launch (`oporch`). Edit anytime under `.opencode-orchestra
 └── oporch.db            ← SQLite database (WAL mode)
 ```
 
-### `roles.yaml` — Agent Roles
-
-```yaml
-roles:
-  orchestrator:
-    description: "Controls overall milestone execution, delegates work, evaluates evidence"
-    model: "deepseek-v4-flash"
-    max_workers: 1
-  planner:
-    description: "Analyzes objectives and produces atomic work units"
-    model: "deepseek-v4-flash"
-    max_workers: 1
-  architect:
-    description: "Reviews architectural impact and identifies structural risks"
-    model: "deepseek-v4-flash"
-    max_workers: 1
-  builder:
-    description: "Implements work units with smallest coherent changes"
-    model: "deepseek-v4-flash"
-    max_workers: 3
-  reviewer:
-    description: "Adversarial code review against acceptance criteria"
-    model: "nemotron-ultra"
-    fallback: "deepseek-v4-flash"
-    max_workers: 1
-  tester:
-    description: "Independent validation of acceptance criteria"
-    model: "nemotron-ultra"
-    fallback: "deepseek-v4-flash"
-    max_workers: 1
-  debugger:
-    description: "Root-cause analysis of failures"
-    model: "mimo-v2.5"
-    fallback: "deepseek-v4-flash"
-    max_workers: 1
-  researcher:
-    description: "External library and documentation investigation"
-    model: "deepseek-v4-flash"
-    max_workers: 1
-  benchmark_analyst:
-    description: "Before/after metrics comparison and drift detection"
-    model: "nemotron-ultra"
-    fallback: "deepseek-v4-flash"
-    max_workers: 1
-  supervisor:
-    description: "Merge gate: re-diffs WU branches and merges into integration"
-    model: "nemotron-ultra"
-    fallback: "deepseek-v4-flash"
-    max_workers: 1
-```
-
-Premium roles (reviewer, tester, debugger, supervisor) have fallbacks so execution continues if the primary model is unavailable.
-
-### `models.yaml` — Model Resolution
-
-```yaml
-models:
-  deepseek-v4-flash:
-    provider: "deepseek"
-    model_id: "opencode/deepseek-v4-flash-free"
-    context_limit: 131072
-    output_limit: 16384
-    tier: "fast"
-  nemotron-ultra:
-    provider: "nvidia"
-    model_id: "opencode/nemotron-3-ultra-free"
-    context_limit: 131072
-    output_limit: 16384
-    tier: "heavy"
-  mimo-v2.5:
-    provider: "deepseek"
-    model_id: "opencode/mimo-v2.5-free"
-    context_limit: 131072
-    output_limit: 16384
-    tier: "standard"
-```
-
-Each role references a **logical model key** (e.g. `nemotron-ultra`). `resolve_model()` looks it up in `models.yaml`, returns the real `model_id` (e.g. `opencode/nemotron-3-ultra-free`). If the primary key isn't found, it falls back to the role's `fallback`. This decouples role config from actual model IDs — swap models in one place.
-
-### `policies.yaml` — Behavior Control
-
-```yaml
-approval_mode: SUPERVISED        # SUPERVISED | AUTONOMOUS | STRICT
-retry:
-  max_attempts: 3
-  attempt_2_receives_review: true
-  attempt_3_uses_debugger: true
-completion_gate:
-  require_review_approval: true
-  require_tests_pass: true
-  require_benchmark_evidence: false
-  max_critical_findings: 0
-  max_high_findings: 0
-  require_supervisor_merge: false
-context:
-  include_relevant_prd_sections: true
-  include_prior_decisions: true
-  include_dependency_outputs: true
-merge_conflict:
-  route: "debugger"
-  max_debugger_attempts: 1
-security:
-  never_auto_merge_to: ["main", "develop", "master"]
-  strict_disables_auto_merge: true
-```
-
 ---
 
 ## 💾 Data Storage (SQLite)
@@ -537,16 +615,6 @@ oporch ❯ /team edit
   ✓ Roster edit complete
 ```
 
-### Phase-Boundary Auto-Scaling
-
-After each completed phase, `RosterScaler` re-evaluates:
-
-| Action | Approval | Guard |
-|--------|----------|-------|
-| **Resize** | Auto-applies | Stay within sizing band |
-| **Retire** | Auto-applies | Never the last role; never cross-cutting (reviewer/tester) |
-| **Spawn** | Gated (requires approval) | Budget and band limits |
-
 ---
 
 ## ⚡ Parallel Execution Engine
@@ -598,41 +666,6 @@ Every work unit gets its own git worktree — agents never share a working direc
 
 ---
 
-## 🧩 Supervisor Intelligence
-
-### §11a — Dynamic Model Selection
-
-`SupervisorModelSelector.select_model()` scores per-WU complexity from:
-- Number of files affected
-- Acceptance criteria count
-- Attempt history (failures → bump tier)
-- Remaining token budget
-
-Picks a model within the role's configured `tier` range (`fast` → `standard` → `heavy`), logged as a `MODEL_SELECTED` event.
-
-### §11b — Self-Healing Recovery
-
-`RecoveryLadder.next_strategy()` resolves strategies in order:
-1. `retry_same_model`
-2. `retry_with_model_bump`
-3. `retry_with_narrower_scope` (split WU)
-4. `retry_with_debugger_prefix`
-5. `rollback_and_reassign`
-6. Escalate to user
-
-### §11c — Scoped File Access
-
-`validate_file_access()` checks an agent's changed-file list against `allowed_paths` globs before results are accepted.
-
-### Run-Level Health Checks
-
-`RunHealthCheck.check()` at phase boundaries:
-- Rising failure rates → flag
-- Starved roles with ready work → recommend resize
-- Runaway worktree disk usage → warn
-
----
-
 ## 🧠 Agent Memory
 
 Persistent cross-run memory so agents learn from past runs:
@@ -657,8 +690,6 @@ oporch ❯ /memory
   └────┴─────────┴──────┴──────────────────────────────────────────┘
 ```
 
-Memories are injected into each agent's context as `## Known project memory`. Portable via `oporch memory export/import`.
-
 ---
 
 ## 🔒 Security
@@ -672,12 +703,6 @@ Memories are injected into each agent's context as `## Known project memory`. Po
    - GitHub/Slack tokens, `.env` assignments
 3. **Sandboxed env**: Agent subprocesses inherit only safe env vars (PATH, TEMP, HOME)
    - Denied: `AWS_*`, `AZURE_*`, `GOOGLE_API*`, `STRIPE*`, `TWILIO*`, etc.
-
-### Protected Branch Enforcement
-
-- `never_auto_merge_to: ["main", "develop", "master"]` — enforced structurally via `ProtectedBranchError`
-- STRICT mode requires manual approval for every merge
-- Per-WU git worktrees disable push (structural, not by convention)
 
 ---
 
@@ -706,8 +731,6 @@ Open with `/view` or `oporch view`:
 | `p` | Toggle dispatcher pause |
 | `r` | Force refresh |
 
-**Status glyphs:** `▶` IN_PROGRESS &nbsp; `✓` COMPLETED &nbsp; `✗` FAILED &nbsp; `⚡` MERGE_CONFLICT &nbsp; `⏸` PENDING &nbsp; `…` READY &nbsp; `⊘` BLOCKED
-
 ---
 
 ## 📈 Observability
@@ -720,20 +743,6 @@ Open with `/view` or `oporch view`:
 | `/report failures` | Aggregate failure patterns across all runs |
 | `oporch diff <a> <b>` | Side-by-side run comparison (WU count, completion rate, per-role failure rates) |
 | `/doctor` | 8 health checks: opencode CLI, configs, git, pytest |
-
-### Run Replay Example
-
-```
-oporch ❯ /replay
-  ┌──────────┬─────────┬────────┬──────────────────┬──────────┐
-  │ Time     │ Role    │ WU     │ Event            │ Duration │
-  ├──────────┼─────────┼────────┼──────────────────┼──────────┤
-  │ 12:01:03 │ planner │ --     │ PLAN_CREATED     │ 4200ms   │
-  │ 12:01:08 │ builder │ WU-001 │ BUILD_STARTED    │ --       │
-  │ 12:01:42 │ builder │ WU-001 │ BUILD_COMPLETED  │ 34000ms  │
-  │ 12:01:43 │ reviewer│ WU-001 │ REVIEW_APPROVED  │ 8200ms   │
-  └──────────┴─────────┴────────┴──────────────────┴──────────┘
-```
 
 ---
 
@@ -780,8 +789,6 @@ All Typer subcommands still work for scripting and CI:
 | `MergeConflictError` | Squash merge conflict |
 | `ProtectedBranchError` | Merge to protected branch |
 
-All state files carry a `schema_version` field — mismatches raise `RunStateError` to prevent silent data corruption.
-
 ---
 
 ## 🧪 Testing
@@ -789,35 +796,6 @@ All state files carry a `schema_version` field — mismatches raise `RunStateErr
 ```bash
 pytest -v     # 349 tests, ~34 seconds
 ```
-
-### 24 Test Files
-
-| Test File | Tests | Focus |
-|-----------|-------|-------|
-| `test_repl.py` | 16 | Slash dispatch, multi-line input, plan detection, clean exit |
-| `test_runner.py` | 22 | Full milestone execution, retry ladder, review/test integration |
-| `test_dispatcher.py` | 16 | Parallel waves, semaphore bounds, resize, cancellation |
-| `test_db.py` | 25 | SQLite CRUD for all 7 tables, WAL mode, migration, export/import |
-| `test_git_manager.py` | 20 | Worktree create/cleanup, commit, diff, merge gate, protected branches |
-| `test_security.py` | 32 | 14 secret patterns, env sandboxing, redaction |
-| `test_orchestrator.py` | 9 | plan/run/resume, state transitions |
-| `test_team_composer.py` | 25 | Sizing bands, domain inference, roster validation |
-| `test_context_builder.py` | 39 | Plan-doc parsing, per-role context building |
-| `test_state_machine.py` | 20 | All transitions, history, terminal detection |
-| `test_roster_scaling.py` | 15 | Suggest/apply for spawn/retire/resize |
-| `test_memory_wiring.py` | 10 | Memory recall → context injection |
-| `test_observability.py` | 9 | Structured events, replay, diff stats |
-| `test_dashboard.py` | 8 | TUI rendering, WU cards, role panels |
-| `test_config.py` | 12 | Load/save YAML, resolve_model, fallback chain |
-| `test_validate.py` | 9 | JSON repair, planner output, schema mismatch |
-| `test_work_unit.py` | 11 | DAG validation, topo sort, cycle detection |
-| `test_event_log.py` | 6 | Record, filter, all, persistence |
-| `test_decision_ledger.py` | 8 | Append, search, find-by-question, clear |
-| `test_redact.py` | 14 | All 14 secret patterns |
-| `test_executor.py` | 5 | FakeAgentExecutor call tracking |
-| `test_doctor.py` | 3 | Health check pass/fail |
-| `test_run_state.py` | 8 | CRUD, worker output persistence |
-| `test_dashboard.py` | 8 | TUI rendering, WU cards, role panels |
 
 ---
 
