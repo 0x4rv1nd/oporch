@@ -2,7 +2,7 @@
   <img src="https://img.shields.io/badge/python-3.12%2B-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="License">
   <img src="https://img.shields.io/badge/version-2.0.0-orange?style=for-the-badge" alt="Version">
-  <img src="https://img.shields.io/badge/tests-349%20passing-brightgreen?style=for-the-badge" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-381%20passing-brightgreen?style=for-the-badge" alt="Tests">
   <img src="https://img.shields.io/badge/status-v2%20complete-blueviolet?style=for-the-badge" alt="Status">
 </p>
 
@@ -26,9 +26,11 @@
 - [Installation Guide](#-installation-guide)
 - [Quick Start](#-quick-start)
 - [Interactive Commands](#-interactive-commands)
+- [Built-in Smart Proxy & Rate-Limit Shield](#-built-in-smart-proxy--rate-limit-shield)
+- [Native Codebase AST Indexer](#-native-codebase-ast-indexer)
 - [Supervisor & Model Selection](#-supervisor--model-selection)
-- [Headroom Proxy Integration](#-headroom-proxy-integration-context-compression)
-- [Codebase-Memory MCP Integration](#-codebase-memory-mcp-integration-knowledge-graph)
+- [Headroom Proxy Integration](#-headroom-proxy-integration-optional)
+- [Codebase-Memory MCP Integration](#-codebase-memory-mcp-integration-optional)
 - [Architecture](#-architecture)
 - [Data Flow & Lifecycle](#-data-flow--lifecycle)
 - [State Machine](#-state-machine)
@@ -59,8 +61,9 @@
 2. 🤖 **Composes a team** — sized to the work (3–9+ specialized AI agents)
 3. 📋 **Decomposes** phases into a DAG of atomic work units
 4. ⚡ **Executes in parallel** — bounded concurrency per role, retry ladder, merge gate
-5. 🔒 **Gates completion** — adversarial review + testing + evidence validation
-6. 🧠 **Learns** — persistent memory across runs (gotchas, conventions, failure patterns)
+5. 🛡️ **Shields your runs** — built-in rate-limit retries, quota fallback & AST codebase intelligence
+6. 🔒 **Gates completion** — adversarial review + testing + evidence validation
+7. 🧠 **Learns** — persistent memory across runs (gotchas, conventions, failure patterns)
 
 No flags. No multi-step commands. Just paste and build.
 
@@ -72,6 +75,8 @@ No flags. No multi-step commands. Just paste and build.
 | **One orchestrator, many agents** | `HeadOrchestrator` manages state, routing, retries, and escalation |
 | **Dynamic teams** | Roster is sized per-plan, not a fixed enum |
 | **Supervisor intelligence** | Dynamic model tier selection, self-healing recovery, and merge gate |
+| **Built-in Smart Proxy** | Executor-level rate-limit backoff, quota model fallback & concurrency limits |
+| **Native Codebase Indexer** | AST symbol extraction & caller graph stored in SQLite; auto-enriches context |
 | **Parallel execution** | Asyncio dispatcher with per-role semaphore concurrency |
 | **Git isolation** | One worktree per work unit — agents never share a working directory |
 | **Evidence-gated completion** | Review + test + supervisor merge must all pass before `COMPLETED` |
@@ -220,6 +225,16 @@ Everything happens inside the REPL. Type `/` to see commands:
 | `/status` | Show run state + work unit tree with progress |
 | `/cancel` | Cancel the current run |
 
+### Codebase Intelligence & Proxy
+
+| Command | What it does |
+|---------|-------------|
+| `/index [--full]` | Trigger incremental (or full) AST re-indexing of the project |
+| `/search <pattern>` | Regex/substring search across indexed classes, functions & methods |
+| `/callers <name>` | Find all recorded call sites calling `<name>` |
+| `/arch` | Print architecture summary (entry points, hotspot functions, top modules) |
+| `/proxy-stats` | Show rate-limit retries, quota fallbacks, and per-model token usage |
+
 ### Team & Memory
 
 | Command | What it does |
@@ -231,7 +246,7 @@ Everything happens inside the REPL. Type `/` to see commands:
 | `/remember <text>` | Teach the builder a fact or convention |
 | `/forget <id>` | Delete a memory |
 
-### Observability
+### Observability & System
 
 | Command | What it does |
 |---------|-------------|
@@ -242,13 +257,41 @@ Everything happens inside the REPL. Type `/` to see commands:
 | `/logs [N]` | Show last N structured events |
 | `/models` | Show resolved role → model mappings |
 | `/doctor` | 8 environment health checks |
-
-### Session
-
-| Command | What it does |
-|---------|-------------|
 | `/help` | Show all available commands |
 | `/quit` or `/q` | Exit oporch |
+
+---
+
+## 🛡️ Built-in Smart Proxy & Rate-Limit Shield
+
+`oporch` includes an embedded execution-level proxy layer (`RetryingOpenCodeExecutor`) so you never have to worry about rate-limits or quota stalls during long multi-agent runs:
+
+- **⚡ Rate-Limit Detection**: Automatically detects `429`, `rate_limit_error`, `too many requests`, `throttled`, and `retry after` in agent execution streams.
+- **⏳ Exponential Backoff + Jitter**: Performs exponential backoff (`min(base * 2^attempt, cap)`) with ±20% jitter to prevent thundering herd spikes.
+- **🔄 Instant Quota Fallback**: When hitting `insufficient_quota`, `exceeded your current quota`, or credit exhaustion, oporch immediately switches the role to its designated fallback model without halting the run.
+- **🚦 Concurrency Limiter**: Employs per-model semaphores across concurrent agents to keep simultaneous model invocations safely within provider burst limits.
+- **🔌 Headroom Coexistence**: Detects if an external Headroom proxy is already active on `localhost:8787` and defers transparently without conflict.
+
+Check live retry & token metrics at any time during your session:
+```
+oporch ❯ /proxy-stats
+```
+
+---
+
+## 🔍 Native Codebase AST Indexer
+
+`oporch` includes a lightweight, built-in code intelligence engine (`CodebaseIndexer`) that indexes your project directly into `oporch.db` using Python's standard library `ast` (plus regex parsers for JS, TS, Go, Rust, Java, and Kotlin):
+
+- **AST Symbol Graph**: Extracts functions, classes, methods, docstrings, imports, and cross-file call sites without third-party dependencies.
+- **Incremental Background Indexing**: Auto-indexes changed files on startup via `mtime` comparison in <0.1s.
+- **Automated Context Enrichment**: When a builder agent is assigned a work unit, `context_builder.py` automatically injects the affected file signatures and call-graph hierarchies into the agent's context.
+- **Instant Code Discovery**: Query symbols and call graphs on the fly:
+  ```
+  oporch ❯ /search User
+  oporch ❯ /callers execute_work_unit
+  oporch ❯ /arch
+  ```
 
 ---
 
@@ -321,84 +364,26 @@ roles:
 
 ---
 
-## 🗜️ Headroom Proxy Integration (Context Compression)
+## 🗜️ Headroom Proxy Integration (Optional)
 
-When running multi-agent orchestrations with dozens of work units, tool outputs, test logs, and git diffs can rapidly consume LLM context and escalate token costs.
-
-**[Headroom](https://github.com/headroomlabs-ai/headroom)** is an open-source local context compression layer designed specifically for AI coding agents.
-
-### Why Headroom + oporch?
-
-- **20–90% token reduction**: Compresses large JSON payloads, test logs, AST trees, and long files before they reach the LLM.
-- **Output token reduction**: Shapes model verbosity and dials down reasoning effort on routine file checks while preserving full depth for hard debugging.
-- **Zero code changes**: Sits as a transparent local proxy for OpenCode.
-
-### How to use oporch with Headroom
-
-#### Option A: One-Command Wrapper (Recommended)
-
-Wrap your OpenCode session before launching oporch:
+For large runs with huge tool outputs or test logs, you can optionally pair oporch with **[Headroom](https://github.com/headroomlabs-ai/headroom)** for transparent token compression:
 
 ```bash
 # 1. Install Headroom
 pip install "headroom-ai[all]"
 
-# 2. Wrap OpenCode with Headroom proxy
+# 2. Wrap OpenCode
 headroom wrap opencode
 
-# 3. Launch oporch in your project
+# 3. Launch oporch (built-in proxy automatically defers to Headroom)
 oporch
-```
-
-#### Option B: Standalone Proxy
-
-```bash
-# Start Headroom proxy on port 8787 with output shaping
-export HEADROOM_OUTPUT_SHAPER=1
-headroom proxy --port 8787
-
-# In your project terminal, run oporch (OpenCode will route through localhost:8787)
-oporch
-```
-
-You can view live token savings anytime with:
-```bash
-headroom dashboard
 ```
 
 ---
 
-## 🗺️ Codebase-Memory MCP Integration (Knowledge Graph)
+## 🗺️ Codebase-Memory MCP Integration (Optional)
 
-Instead of forcing agents to run dozens of blind `grep`, `find`, and `cat` commands across the codebase, oporch integrates seamlessly with **[codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp)**.
-
-### Why Codebase-Memory MCP?
-
-- **Instant AST Knowledge Graph**: Indexes the entire repository into functions, classes, routes, and call chains using 158 Tree-Sitter grammars in milliseconds.
-- **99.2% fewer tokens**: Structural queries (e.g. `trace_path`, `search_graph`) consume ~3,400 tokens compared to ~412,000 tokens for manual file exploration.
-- **No hallucinated imports**: Agents know exact call paths and type hierarchies before generating code.
-
-### Installation & Setup
-
-**Windows (PowerShell):**
-```powershell
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/install.ps1 -OutFile install.ps1
-Unblock-File .\install.ps1
-.\install.ps1
-```
-
-**macOS / Linux:**
-```bash
-curl -fsSL https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/install.sh | bash
-```
-
-Once installed, OpenCode and oporch agents automatically leverage MCP graph tools:
-- `search_graph`: Find functions, classes, routes by regex pattern
-- `trace_path`: Trace incoming callers and outgoing call chains
-- `get_architecture`: Instant high-level project summary and service boundaries
-- `detect_changes`: Impact analysis of modified files against dependent symbols
-
-Explore the 3D interactive knowledge graph at `http://localhost:9749`.
+If you have **[codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp)** installed, OpenCode agents can also query external Tree-Sitter knowledge graphs during execution for extended 158+ language coverage and 3D visual graph interfaces.
 
 ---
 
