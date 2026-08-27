@@ -71,7 +71,7 @@ HEAD_MODEL_FILE = CONFIG_DIR / "head_model.txt"
 
 
 def get_head_model() -> str:
-    """Return the active Head Supervisor model key (e.g. 'nemotron-ultra' or 'lead-reviewer')."""
+    """Return the active Head Supervisor model key (e.g. 'big-pickle', 'nemotron-ultra')."""
     if HEAD_MODEL_FILE.exists():
         val = HEAD_MODEL_FILE.read_text(encoding="utf-8").strip()
         if val:
@@ -84,6 +84,8 @@ def get_head_model() -> str:
         pass
     try:
         mcfg = load_models()
+        if "big-pickle" in mcfg.models:
+            return "big-pickle"
         for key, m in mcfg.models.items():
             if getattr(m, "tier", None) == "heavy":
                 return key
@@ -91,7 +93,7 @@ def get_head_model() -> str:
             return next(iter(mcfg.models.keys()))
     except Exception:
         pass
-    return "nemotron-ultra"
+    return "big-pickle"
 
 
 def set_head_model(model_key: str) -> None:
@@ -146,8 +148,10 @@ def list_models_summary() -> list[dict[str, Any]]:
         return out
     except Exception:
         return [
+            {"key": "big-pickle", "provider": "opencode", "model_id": "opencode/big-pickle", "tier": "standard"},
             {"key": "deepseek-v4-flash", "provider": "deepseek", "model_id": "opencode/deepseek-v4-flash-free", "tier": "fast"},
             {"key": "nemotron-ultra", "provider": "nvidia", "model_id": "opencode/nemotron-3-ultra-free", "tier": "heavy"},
             {"key": "mimo-v2.5", "provider": "deepseek", "model_id": "opencode/mimo-v2.5-free", "tier": "standard"},
         ]
+
 

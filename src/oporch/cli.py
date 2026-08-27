@@ -1237,11 +1237,6 @@ def team_history(
     table.add_column("Active Until")
     for h in history:
         until = h["active_until"] or "[green]active[/green]"
-        table.add_row(
-            h["role_key"], h["model"] or "--", str(h["max_workers"]),
-            (h["active_from"] or "")[:19].replace("T", " "),
-            str(until)[:19].replace("T", " ") if h["active_until"] else str(until),
-        )
     console.print(table)
 
 
@@ -1262,59 +1257,61 @@ def _write_default_roles() -> None:
     import yaml
     data = {
         "roles": {
-            "orchestrator": {
-                "description": "Controls overall milestone execution, delegates work, evaluates evidence",
-                "model": "deepseek-v4-flash",
-                "max_workers": 1,
-            },
-            "planner": {
-                "description": "Analyzes objectives and produces atomic work units",
-                "model": "deepseek-v4-flash",
-                "max_workers": 1,
-            },
-            "architect": {
-                "description": "Reviews architectural impact and identifies structural risks",
-                "model": "deepseek-v4-flash",
-                "max_workers": 1,
-            },
             "builder": {
                 "description": "Implements work units with smallest coherent changes",
-                "model": "deepseek-v4-flash",
+                "model": "big-pickle",
+                "fallback": "deepseek-v4-flash",
                 "max_workers": 3,
             },
             "reviewer": {
                 "description": "Adversarial code review against acceptance criteria",
                 "model": "nemotron-ultra",
-                "fallback": "deepseek-v4-flash",
+                "fallback": "big-pickle",
                 "max_workers": 1,
             },
             "tester": {
                 "description": "Independent validation of acceptance criteria",
-                "model": "nemotron-ultra",
+                "model": "big-pickle",
                 "fallback": "deepseek-v4-flash",
+                "max_workers": 1,
+            },
+            "orchestrator": {
+                "description": "Controls overall milestone execution, delegates work, evaluates evidence",
+                "model": "big-pickle",
+                "max_workers": 1,
+            },
+            "architect": {
+                "description": "Reviews architectural impact and identifies structural risks",
+                "model": "big-pickle",
                 "max_workers": 1,
             },
             "debugger": {
                 "description": "Root-cause analysis of failures",
-                "model": "mimo-v2.5",
+                "model": "big-pickle",
+                "fallback": "mimo-v2.5",
+                "max_workers": 1,
+            },
+            "planner": {
+                "description": "Analyzes objectives and produces atomic work units",
+                "model": "big-pickle",
                 "fallback": "deepseek-v4-flash",
                 "max_workers": 1,
             },
             "researcher": {
                 "description": "External library and documentation investigation",
-                "model": "deepseek-v4-flash",
+                "model": "big-pickle",
                 "max_workers": 1,
             },
             "benchmark_analyst": {
                 "description": "Before/after metrics comparison and drift detection",
                 "model": "nemotron-ultra",
-                "fallback": "deepseek-v4-flash",
+                "fallback": "big-pickle",
                 "max_workers": 1,
             },
             "supervisor": {
                 "description": "Merge gate: re-diffs WU branches and merges into integration",
-                "model": "nemotron-ultra",
-                "fallback": "deepseek-v4-flash",
+                "model": "big-pickle",
+                "fallback": "nemotron-ultra",
                 "max_workers": 1,
             },
         }
@@ -1362,21 +1359,31 @@ def _write_default_models() -> None:
     import yaml
     data = {
         "models": {
+            "big-pickle": {
+                "provider": "opencode",
+                "model_id": "opencode/big-pickle",
+                "tier": "standard",
+                "context_limit": 131072,
+                "output_limit": 16384,
+            },
             "deepseek-v4-flash": {
                 "provider": "deepseek",
                 "model_id": "opencode/deepseek-v4-flash-free",
+                "tier": "fast",
                 "context_limit": 131072,
                 "output_limit": 16384,
             },
             "nemotron-ultra": {
                 "provider": "nvidia",
                 "model_id": "opencode/nemotron-3-ultra-free",
+                "tier": "heavy",
                 "context_limit": 131072,
                 "output_limit": 16384,
             },
             "mimo-v2.5": {
                 "provider": "deepseek",
                 "model_id": "opencode/mimo-v2.5-free",
+                "tier": "standard",
                 "context_limit": 131072,
                 "output_limit": 16384,
             },

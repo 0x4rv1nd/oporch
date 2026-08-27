@@ -317,14 +317,14 @@ oporch ❯ /proxy-stats
 
 ### How Model Assignment Works
 
-1. **You choose the Head Supervisor Model** (e.g. `nemotron-ultra`, `claude-3-7-sonnet`, `deepseek-v4-flash`).
+1. **You choose the Head Supervisor Model** (e.g. `big-pickle`, `nemotron-ultra`, `claude-3-7-sonnet`).
 2. **The Head Model analyzes the plan and assigns sub-models** for all roles (builders, reviewers, testers, debuggers) based on task domain and complexity.
 3. **You have complete control to customize**: During plan approval, press `c` or use `/sub-models` to override any sub-agent's model before execution.
 
 ```
                       ┌─────────────────────────────────────────┐
                       │          HEAD SUPERVISOR MODEL          │
-                      │ (nemotron-ultra / claude-3-7-sonnet)    │
+                      │   (big-pickle / nemotron-ultra)         │
                       │  Analyzes plan & assigns sub-models     │
                       └────────────────────┬────────────────────┘
                                            │
@@ -332,8 +332,8 @@ oporch ❯ /proxy-stats
        ▼                        ▼                        ▼                        ▼
 ┌──────────────┐         ┌──────────────┐         ┌──────────────┐         ┌──────────────┐
 │  DB AGENT    │         │  UI BUILDER  │         │   REVIEWER   │         │    TESTER    │
-│  (mimo-v2.5) │         │ (deepseek-v4)│         │(nemotron-3)  │         │ (deepseek-v4)│
-│ complex SQL  │         │  fast coder  │         │  heavy gate  │         │  validation  │
+│ (big-pickle) │         │ (deepseek-v4)│         │(nemotron-3)  │         │ (big-pickle) │
+│ standard tier│         │  fast coder  │         │  heavy gate  │         │  validation  │
 └──────────────┘         └──────────────┘         └──────────────┘         └──────────────┘
 ```
 
@@ -344,7 +344,7 @@ Models are grouped into 3 operational tiers in `models.yaml`:
 | Tier | Role Type | Purpose | Default Example |
 |------|-----------|---------|-----------------|
 | **`fast`** | Builder, Planner, Researcher | High throughput, quick iteration, code generation | `deepseek-v4-flash` / `gpt-4o-mini` |
-| **`standard`** | Debugger, Architect, DB Specialist | Balanced reasoning, deep context diagnostics | `mimo-v2.5` / `claude-3-5-sonnet` |
+| **`standard`** | Builder, Debugger, Architect, DB Specialist | Balanced reasoning, deep context diagnostics (default) | `big-pickle` / `claude-3-5-sonnet` |
 | **`heavy`** | Supervisor, Reviewer, Tester | Adversarial verification, AST checks, merge governance | `nemotron-ultra` / `claude-3-7-sonnet` |
 
 ### Selecting Models in the REPL
@@ -369,10 +369,10 @@ You can map any provider or model supported by OpenCode:
 ```yaml
 # .opencode-orchestrator/config/models.yaml
 models:
-  fast-coder:
-    provider: "deepseek"
-    model_id: "opencode/deepseek-v4-flash-free"
-    tier: "fast"
+  big-pickle:
+    provider: "opencode"
+    model_id: "opencode/big-pickle"
+    tier: "standard"
   lead-reviewer:
     provider: "anthropic"
     model_id: "anthropic/claude-3-7-sonnet"
@@ -383,11 +383,11 @@ models:
 # .opencode-orchestrator/config/roles.yaml
 roles:
   builder:
-    model: "fast-coder"
+    model: "big-pickle"
     fallback: "deepseek-v4-flash"
     max_workers: 3
   supervisor:
-    model: "lead-reviewer"
+    model: "big-pickle"
     fallback: "nemotron-ultra"
     max_workers: 1
 ```

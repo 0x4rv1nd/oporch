@@ -61,8 +61,8 @@ DOMAIN_KEYWORDS: dict[str, list[str]] = {
 }
 
 DEFAULT_MODELS = {
-    "reviewer": ("nemotron-ultra", "deepseek-v4-flash"),
-    "tester": ("nemotron-ultra", "deepseek-v4-flash"),
+    "reviewer": ("nemotron-ultra", "big-pickle"),
+    "tester": ("big-pickle", "deepseek-v4-flash"),
 }
 
 
@@ -95,7 +95,10 @@ def _heuristic_roster(
     """Deterministic fallback roster built from keyword clustering."""
     domains = infer_domains(phases)
     lo, hi = sizing_band(len(phases))
-    primary_model = (available_models or ["deepseek-v4-flash"])[0]
+    primary_model = (
+        "big-pickle" if (available_models and "big-pickle" in available_models)
+        else (available_models or ["big-pickle"])[0]
+    )
 
     roles: list[TeamRole] = []
     # Domain agents, largest domain groups first.
@@ -159,7 +162,7 @@ def _fit_to_band(roles: list[TeamRole], lo: int, hi: int) -> list[TeamRole]:
             merged_into.domains.extend(dropped.domains)
     while len(cross) + len(domain) < lo:
         fallback_model = (
-            (cross[0].fallback or "deepseek-v4-flash") if cross else "deepseek-v4-flash"
+            (cross[0].fallback or "big-pickle") if cross else "big-pickle"
         )
         domain.append(
             TeamRole(
