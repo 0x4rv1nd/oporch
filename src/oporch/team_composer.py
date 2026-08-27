@@ -217,22 +217,37 @@ def compose_team(
     run_id: str = "pending",
     executor: ComposerExecutor | None = None,
     available_models: list[str] | None = None,
+    head_model: str | None = None,
 ) -> tuple[TeamRoster, bool]:
-    """Propose a team roster for a parsed plan.
+    """Propose a team roster for a parsed plan using the Head Supervisor Model.
 
     Returns ``(roster, from_agent)`` where ``from_agent`` is False when the
     deterministic fallback produced the roster.
     """
+    from . import config as cfg
+
+    active_head = head_model or cfg.get_head_model()
+
     if executor is not None:
-        prompt = build_composer_prompt(phases, repo_summary, available_models)
+        prompt = build_composer_prompt(phases, repo_summary, available_models, head_model=active_head)
         try:
             from .models import AgentTask, ContextPack
+
+            # Resolve actual model_id for the Head Model if configured
+            resolved_head_model_id = None
+            try:
+                mcfg = cfg.load_models()
+                if active_head in mcfg.models:
+                    resolved_head_model_id = mcfg.models[active_head].model_id
+            except Exception:
+                pass
 
             task = AgentTask(
                 objective=f"Compose team roster for {len(phases)} phases",
                 raw_prompt=prompt,
+                model_override=resolved_head_model_id or active_head,
             )
-            result = executor.run("planner", task, ContextPack())
+            result = executor.run("supervisor", task, ContextPack())
             roster = parse_roster_output(result.output, run_id)
             if roster is not None and not validate_roster(roster, len(phases)):
                 return roster, True
@@ -245,8 +260,10 @@ def build_composer_prompt(
     phases: list[Phase],
     repo_summary: str,
     available_models: list[str] | None = None,
+    head_model: str | None = None,
 ) -> str:
     from pathlib import Path
+    from . import config as cfg
 
     prompt_path = Path(__file__).parent / "prompts" / "team_composer.md"
     template = (
@@ -259,14 +276,28 @@ def build_composer_prompt(
     for p in phases:
         criteria = "; ".join(p.acceptance_criteria[:3]) or "(none listed)"
         phase_lines.append(f"- Phase {p.number}: {p.title} — {criteria}")
-    models_line = ", ".join(available_models or [])
+
+    models_desc: list[str] = []
+    try:
+        mcfg = cfg.load_models()
+        for key, m in mcfg.models.items():
+            tier = getattr(m, "tier", "standard")
+            provider = getattr(m, "provider", "")
+            models_desc.append(f"- `{key}` (tier: {tier}, provider: {provider})")
+    except Exception:
+        for m in available_models or []:
+            models_desc.append(f"- `{m}`")
+
+    models_text = "\n".join(models_desc) if models_desc else "(default models)"
 
     replacements = {
         "{phases}": "\n".join(phase_lines) or "(no phases parsed)",
         "{repo_summary}": repo_summary or "(empty)",
-        "{models}": models_line or "(defaults)",
+        "{models}": models_text,
+        "{head_model}": head_model or "nemotron-ultra",
     }
     out = template
     for k, v in replacements.items():
         out = out.replace(k, v)
     return out
+

@@ -59,6 +59,9 @@ _SLASH_COMMANDS: dict[str, str] = {
     "/logs [N]": "Show last N structured events",
     "/cancel": "Cancel the current run",
     "/doctor": "Run environment health checks",
+    # ─ Model Selection ──────────────────────────────────────────
+    "/head-model [name]": "View or select the Head Supervisor model",
+    "/sub-models": "View or customize models assigned to sub-agents",
     # ─ Codebase index ───────────────────────────────────────────
     "/index": "Force full re-index of codebase (runs automatically on startup)",
     "/search <pat>": "Search indexed symbols by regex/substring",
@@ -232,7 +235,8 @@ class OporchREPL:
         run_id = _current_run_id()
         state = _current_state()
 
-        status_line = f"[dim]State:[/dim] [bold]{state}[/bold]"
+        head_model = cfg.get_head_model()
+        status_line = f"[dim]State:[/dim] [bold]{state}[/bold]  [dim]Head Model:[/dim] [bold bright_cyan]{head_model}[/bold bright_cyan]"
         if run_id:
             status_line += f"  [dim]Run:[/dim] {run_id[:8]}"
 
@@ -240,7 +244,7 @@ class OporchREPL:
             f"[bold]📂 {escape(project)}[/bold]\n"
             f"{status_line}\n\n"
             "[dim]Paste your implementation plan below, or type [bold]/help[/bold] for commands.[/dim]\n"
-            "[dim]Use [bold]/quit[/bold] to exit.[/dim]"
+            "[dim]Use [bold]/head-model[/bold] to switch supervisor, or [bold]/quit[/bold] to exit.[/dim]"
         )
         self.console.print(
             Panel(
@@ -275,6 +279,11 @@ class OporchREPL:
             "/logs": self._cmd_logs,
             "/cancel": self._cmd_cancel,
             "/doctor": self._cmd_doctor,
+            # model selection commands
+            "/head-model": self._cmd_head_model,
+            "/headmodel": self._cmd_head_model,
+            "/sub-models": self._cmd_sub_models,
+            "/submodels": self._cmd_sub_models,
             # codebase index commands
             "/index": self._cmd_index,
             "/search": self._cmd_search,
@@ -837,7 +846,7 @@ class OporchREPL:
 
             plan = plan_or_question
 
-            # 4. Show roster
+            # 4. Show roster & model assignments
             from .db import OporchDB
 
             db = OporchDB()
@@ -849,24 +858,32 @@ class OporchREPL:
             finally:
                 db.close()
 
+            active_head = cfg.get_head_model()
+            self.console.print(f"[bold]🤖 Head Supervisor Model:[/bold] [bold bright_cyan]{active_head}[/bold bright_cyan]")
+
             if roster_rows:
-                role_parts = []
+                roster_table = Table(title="Sub-Agent Roster & Assigned Models", show_header=True)
+                roster_table.add_column("Role", style="bold cyan")
+                roster_table.add_column("Assigned Model", style="white bold")
+                roster_table.add_column("Fallback", style="dim")
+                roster_table.add_column("Workers", justify="right")
+                roster_table.add_column("Domains / Scope", style="dim")
                 for r in roster_rows:
                     key = r["role_key"]
-                    workers = r["max_workers"]
-                    if key in ("reviewer", "tester"):
-                        role_parts.append(f"[green]{key} ✓[/green]")
-                    else:
-                        role_parts.append(f"[cyan]{key}[/cyan] x{workers}")
-                self.console.print("[bold]🤖 Team:[/bold] " + "  ".join(role_parts))
+                    model = r.get("model") or "default"
+                    fallback = r.get("fallback") or "—"
+                    workers = str(r.get("max_workers", 1))
+                    domains = ", ".join(r.get("domains") or []) or "all"
+                    roster_table.add_row(key, model, fallback, workers, domains)
+                self.console.print(roster_table)
 
             # 5. Show work units
             self.console.print(f"\n[bold]📋 {len(plan.work_units)} work units[/bold] proposed:\n")
             table = Table(show_header=True)
             table.add_column("ID", style="bold")
             table.add_column("Title")
-            table.add_column("Role")
-            table.add_column("Deps")
+            table.add_column("Assigned Role", style="cyan")
+            table.add_column("Dependencies")
             for wu in plan.work_units:
                 deps = ", ".join(wu.dependencies[:3]) if wu.dependencies else "--"
                 table.add_row(wu.id, wu.title[:50], str(wu.assigned_role), deps)
@@ -877,18 +894,37 @@ class OporchREPL:
                 for a in plan.assumptions:
                     self.console.print(f"  - {a}")
 
-            # 6. Ask for approval
-            self.console.print()
-            try:
-                answer = self.console.input("[bold]Approve and start building? [Y/n][/bold] ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                answer = "n"
+            # 6. Ask for approval / customization
+            while True:
+                self.console.print()
+                try:
+                    answer = self.console.input(
+                        "[bold]Approve and build? [[green]Y[/green]es / [red]n[/red]o / [cyan]c[/cyan]ustomize sub-models / [magenta]h[/magenta]ead-model]: [/bold]"
+                    ).strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    answer = "n"
 
-            if answer in ("", "y", "yes"):
-                self.console.print("[green]✓ Plan approved[/green]")
-                self._run_execution(run_id)
-            else:
-                self.console.print("[yellow]Plan not approved.[/yellow] Edit with /team edit, or paste a new plan.")
+                if answer in ("", "y", "yes"):
+                    self.console.print("[green]✓ Plan approved[/green]")
+                    self._run_execution(run_id)
+                    break
+                elif answer in ("c", "customize"):
+                    self._customize_sub_models_interactive(run_id, roster_rows)
+                    # Refresh roster table
+                    db = OporchDB()
+                    try:
+                        roster_rows = db.get_roster(run_id)
+                    finally:
+                        db.close()
+                    continue
+                elif answer in ("h", "head", "head-model"):
+                    self._cmd_head_model("")
+                    self.console.print("[dim]Re-analyzing with new Head Model...[/dim]")
+                    self._handle_plan_input(text)
+                    return
+                else:
+                    self.console.print("[yellow]Plan not approved.[/yellow] Edit with /team edit, or paste a new plan.")
+                    break
 
         finally:
             try:
@@ -1127,6 +1163,182 @@ class OporchREPL:
             self.console.print(f"[red]Arch error:[/red] {exc}")
 
     # ======================================================================
+    # Head Model & Sub-Agent Model Selection commands
+    # ======================================================================
+
+    def _cmd_head_model(self, arg: str) -> None:
+        """/head-model [model_name] — View or select the Head Supervisor Model."""
+        models_list = cfg.list_models_summary()
+        current = cfg.get_head_model()
+
+        if arg:
+            target = arg.strip()
+            valid_keys = [m["key"] for m in models_list]
+            if target not in valid_keys:
+                self.console.print(
+                    f"[yellow]Unknown model key '{target}'.[/yellow] "
+                    f"Available: {', '.join(valid_keys)}"
+                )
+                return
+            cfg.set_head_model(target)
+            self.console.print(f"[green]✓ Head Supervisor Model set to:[/green] [bold bright_cyan]{target}[/bold bright_cyan]")
+            return
+
+        # Interactive picker
+        table = Table(title="🤖 Head Supervisor Model Selection", show_header=True)
+        table.add_column("#", justify="right", style="dim", width=4)
+        table.add_column("Model Key", style="bold")
+        table.add_column("Tier", style="cyan")
+        table.add_column("Provider")
+        table.add_column("Model ID", style="dim")
+        table.add_column("Active", justify="center")
+
+        for idx, m in enumerate(models_list, 1):
+            is_active = "[green]✓ ACTIVE[/green]" if m["key"] == current else ""
+            table.add_row(
+                str(idx),
+                m["key"],
+                m.get("tier", "standard"),
+                m.get("provider", ""),
+                m.get("model_id", ""),
+                is_active,
+            )
+        self.console.print(table)
+        self.console.print(f"[dim]Current Head Model: [bold]{current}[/bold][/dim]")
+
+        try:
+            choice = self.console.input("\n[bold]Select Head Model [# or key, Enter to keep current]: [/bold]").strip()
+            if not choice:
+                return
+            if choice.isdigit():
+                idx = int(choice) - 1
+                if 0 <= idx < len(models_list):
+                    selected = models_list[idx]["key"]
+                    cfg.set_head_model(selected)
+                    self.console.print(f"[green]✓ Head Supervisor Model set to:[/green] [bold bright_cyan]{selected}[/bold bright_cyan]")
+                else:
+                    self.console.print("[red]Invalid number.[/red]")
+            else:
+                valid_keys = [m["key"] for m in models_list]
+                if choice in valid_keys:
+                    cfg.set_head_model(choice)
+                    self.console.print(f"[green]✓ Head Supervisor Model set to:[/green] [bold bright_cyan]{choice}[/bold bright_cyan]")
+                else:
+                    self.console.print(f"[red]Model '{choice}' not found.[/red]")
+        except (EOFError, KeyboardInterrupt):
+            pass
+
+    def _cmd_sub_models(self, arg: str) -> None:
+        """/sub-models — View and customize models assigned to sub-agent roles."""
+        run_id = _current_run_id()
+        from .db import OporchDB
+
+        db = OporchDB()
+        try:
+            roster = db.get_roster(run_id) if run_id else []
+            if not roster:
+                # Load configured roles if no active run
+                roles_cfg = cfg.load_roles()
+                roster = [
+                    {"role_key": k, "model": v.model, "fallback": v.fallback, "max_workers": v.max_workers, "domains": []}
+                    for k, v in roles_cfg.roles.items()
+                ]
+        except Exception:
+            roster = []
+        finally:
+            db.close()
+
+        if not roster:
+            self.console.print("[yellow]No sub-agent roles configured.[/yellow]")
+            return
+
+        self._customize_sub_models_interactive(run_id or "default", roster)
+
+    def _customize_sub_models_interactive(self, run_id: str, roster_rows: list[dict[str, Any]]) -> None:
+        """Interactive model picker for sub-agent roles."""
+        models_list = cfg.list_models_summary()
+        from .db import OporchDB
+
+        table = Table(title="Select Sub-Agent Role to Change Model", show_header=True)
+        table.add_column("#", justify="right", style="dim", width=4)
+        table.add_column("Role", style="bold cyan")
+        table.add_column("Current Model", style="white bold")
+        table.add_column("Fallback", style="dim")
+        table.add_column("Workers", justify="right")
+
+        for idx, r in enumerate(roster_rows, 1):
+            table.add_row(
+                str(idx),
+                r["role_key"],
+                r.get("model") or "default",
+                r.get("fallback") or "—",
+                str(r.get("max_workers", 1)),
+            )
+        self.console.print(table)
+
+        try:
+            role_choice = self.console.input("\n[bold]Select role # to change model (or Enter to finish): [/bold]").strip()
+            if not role_choice or not role_choice.isdigit():
+                return
+            r_idx = int(role_choice) - 1
+            if not (0 <= r_idx < len(roster_rows)):
+                self.console.print("[red]Invalid role number.[/red]")
+                return
+
+            target_role = roster_rows[r_idx]["role_key"]
+
+            # Show available models
+            m_table = Table(title=f"Choose Model for Sub-Agent '{target_role}'", show_header=True)
+            m_table.add_column("#", justify="right", style="dim", width=4)
+            m_table.add_column("Model Key", style="bold")
+            m_table.add_column("Tier", style="cyan")
+            m_table.add_column("Provider")
+            m_table.add_column("Model ID", style="dim")
+
+            for m_idx, m in enumerate(models_list, 1):
+                m_table.add_row(
+                    str(m_idx),
+                    m["key"],
+                    m.get("tier", "standard"),
+                    m.get("provider", ""),
+                    m.get("model_id", ""),
+                )
+            self.console.print(m_table)
+
+            m_choice = self.console.input(f"\n[bold]Assign model to '{target_role}' [# or key]: [/bold]").strip()
+            if not m_choice:
+                return
+
+            new_model = None
+            if m_choice.isdigit():
+                idx = int(m_choice) - 1
+                if 0 <= idx < len(models_list):
+                    new_model = models_list[idx]["key"]
+            else:
+                if any(m["key"] == m_choice for m in models_list):
+                    new_model = m_choice
+
+            if not new_model:
+                self.console.print("[red]Invalid model choice.[/red]")
+                return
+
+            # Update DB roster and roles config
+            cfg.set_role_model(target_role, new_model)
+            if run_id and run_id != "default":
+                db = OporchDB()
+                try:
+                    db._execute(
+                        "UPDATE roster SET model = ? WHERE run_id = ? AND role_key = ? AND active_until IS NULL",
+                        (new_model, run_id, target_role),
+                    )
+                finally:
+                    db.close()
+
+            self.console.print(f"[green]✓ Assigned model [bold]{new_model}[/bold] to sub-agent role [bold cyan]{target_role}[/bold cyan][/green]")
+        except (EOFError, KeyboardInterrupt):
+            pass
+
+    # ======================================================================
     # Proxy stats command
     # ======================================================================
 
@@ -1147,6 +1359,7 @@ class OporchREPL:
             self.console.print(proxy_stats.as_rich_table())
         except Exception as exc:
             self.console.print(f"[red]Proxy stats error:[/red] {exc}")
+
 
 
 

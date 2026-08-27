@@ -2,7 +2,7 @@
   <img src="https://img.shields.io/badge/python-3.12%2B-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="License">
   <img src="https://img.shields.io/badge/version-2.0.0-orange?style=for-the-badge" alt="Version">
-  <img src="https://img.shields.io/badge/tests-381%20passing-brightgreen?style=for-the-badge" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-386%20passing-brightgreen?style=for-the-badge" alt="Tests">
   <img src="https://img.shields.io/badge/status-v2%20complete-blueviolet?style=for-the-badge" alt="Status">
 </p>
 
@@ -235,13 +235,20 @@ Everything happens inside the REPL. Type `/` to see commands:
 | `/arch` | Print architecture summary (entry points, hotspot functions, top modules) |
 | `/proxy-stats` | Show rate-limit retries, quota fallbacks, and per-model token usage |
 
-### Team & Memory
+### Model & Team Selection
 
 | Command | What it does |
 |---------|-------------|
+| `/head-model [name]` | View or interactively select the Head Supervisor model |
+| `/sub-models` | View or customize models assigned to sub-agents |
 | `/team` | Show the active roster (roles, models, workers, domains) |
 | `/team edit` | Interactive roster editor: add, remove, resize |
 | `/team history` | Show which roles were active during which phases |
+
+### Memory & Learning
+
+| Command | What it does |
+|---------|-------------|
 | `/memory` | List what agents have learned on this project |
 | `/remember <text>` | Teach the builder a fact or convention |
 | `/forget <id>` | Delete a memory |
