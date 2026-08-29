@@ -149,3 +149,39 @@ def test_compose_team_uses_head_model(temp_config_dir):
     assert role_models["backend"] == "fast-coder"
     assert role_models["reviewer"] == "lead-supervisor"
     assert role_models["tester"] == "balanced-model"
+
+
+def test_fetch_opencode_models_mocked(monkeypatch):
+    sample_output = "opencode/big-pickle\nopenrouter/anthropic/claude-3-7-sonnet\nopenrouter/openai/gpt-4o\n"
+    mock_run = MagicMock()
+    mock_run.returncode = 0
+    mock_run.stdout = sample_output
+
+    with patch("subprocess.run", return_value=mock_run):
+        models = cfg.fetch_opencode_models(force_refresh=True)
+        assert "opencode/big-pickle" in models
+        assert "openrouter/anthropic/claude-3-7-sonnet" in models
+        assert "openrouter/openai/gpt-4o" in models
+
+
+def test_list_models_summary_filters(temp_config_dir, monkeypatch):
+    monkeypatch.setattr(
+        cfg,
+        "fetch_opencode_models",
+        lambda force_refresh=False: ["opencode/big-pickle", "openrouter/anthropic/claude-3-7-sonnet", "nvidia/deepseek-ai/deepseek-v4-flash"]
+    )
+    claude_models = cfg.list_models_summary(filter_query="claude")
+    assert len(claude_models) >= 1
+    assert all("claude" in m["key"].lower() or "claude" in m["model_id"].lower() for m in claude_models)
+
+
+def test_resolve_model_uses_live_model_if_not_in_yaml(temp_config_dir, monkeypatch):
+    monkeypatch.setattr(
+        cfg,
+        "fetch_opencode_models",
+        lambda force_refresh=False: ["openrouter/anthropic/claude-3-7-sonnet"]
+    )
+    cfg.set_role_model("builder", "openrouter/anthropic/claude-3-7-sonnet")
+    resolved = cfg.resolve_model("builder")
+    assert resolved == "openrouter/anthropic/claude-3-7-sonnet"
+

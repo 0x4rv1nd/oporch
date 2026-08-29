@@ -1167,66 +1167,79 @@ class OporchREPL:
     # ======================================================================
 
     def _cmd_head_model(self, arg: str) -> None:
-        """/head-model [model_name] — View or select the Head Supervisor Model."""
-        models_list = cfg.list_models_summary()
+        """/head-model [query|model_name] — View, search, or select the Head Supervisor Model."""
         current = cfg.get_head_model()
+        query = arg.strip() if arg else ""
 
-        if arg:
-            target = arg.strip()
-            valid_keys = [m["key"] for m in models_list]
-            if target not in valid_keys:
-                self.console.print(
-                    f"[yellow]Unknown model key '{target}'.[/yellow] "
-                    f"Available: {', '.join(valid_keys)}"
-                )
-                return
-            cfg.set_head_model(target)
-            self.console.print(f"[green]✓ Head Supervisor Model set to:[/green] [bold bright_cyan]{target}[/bold bright_cyan]")
+        # If direct exact match provided
+        all_models = cfg.list_models_summary()
+        exact_match = next((m for m in all_models if m["key"].lower() == query.lower() or m["model_id"].lower() == query.lower()), None)
+        if exact_match and query:
+            cfg.set_head_model(exact_match["key"])
+            self.console.print(f"[green]✓ Head Supervisor Model set to:[/green] [bold bright_cyan]{exact_match['key']}[/bold bright_cyan]")
             return
 
-        # Interactive picker
-        table = Table(title="🤖 Head Supervisor Model Selection", show_header=True)
-        table.add_column("#", justify="right", style="dim", width=4)
-        table.add_column("Model Key", style="bold")
-        table.add_column("Tier", style="cyan")
-        table.add_column("Provider")
-        table.add_column("Model ID", style="dim")
-        table.add_column("Active", justify="center")
+        # Filtered list
+        filter_str = query
+        while True:
+            models_list = cfg.list_models_summary(filter_query=filter_str)
+            total_count = len(cfg.list_models_summary())
 
-        for idx, m in enumerate(models_list, 1):
-            is_active = "[green]✓ ACTIVE[/green]" if m["key"] == current else ""
-            table.add_row(
-                str(idx),
-                m["key"],
-                m.get("tier", "standard"),
-                m.get("provider", ""),
-                m.get("model_id", ""),
-                is_active,
+            table = Table(
+                title=f"🤖 Head Supervisor Model Selection" + (f" (Filter: '{filter_str}')" if filter_str else ""),
+                show_header=True,
             )
-        self.console.print(table)
-        self.console.print(f"[dim]Current Head Model: [bold]{current}[/bold][/dim]")
+            table.add_column("#", justify="right", style="dim", width=4)
+            table.add_column("Model Key / ID", style="bold")
+            table.add_column("Tier", style="cyan")
+            table.add_column("Provider")
+            table.add_column("Active", justify="center")
 
-        try:
-            choice = self.console.input("\n[bold]Select Head Model [# or key, Enter to keep current]: [/bold]").strip()
-            if not choice:
-                return
-            if choice.isdigit():
-                idx = int(choice) - 1
-                if 0 <= idx < len(models_list):
-                    selected = models_list[idx]["key"]
-                    cfg.set_head_model(selected)
-                    self.console.print(f"[green]✓ Head Supervisor Model set to:[/green] [bold bright_cyan]{selected}[/bold bright_cyan]")
-                else:
-                    self.console.print("[red]Invalid number.[/red]")
-            else:
-                valid_keys = [m["key"] for m in models_list]
-                if choice in valid_keys:
-                    cfg.set_head_model(choice)
-                    self.console.print(f"[green]✓ Head Supervisor Model set to:[/green] [bold bright_cyan]{choice}[/bold bright_cyan]")
-                else:
-                    self.console.print(f"[red]Model '{choice}' not found.[/red]")
-        except (EOFError, KeyboardInterrupt):
-            pass
+            display_slice = models_list[:25]
+            for idx, m in enumerate(display_slice, 1):
+                is_active = "[green]✓ ACTIVE[/green]" if m["key"] == current or m["model_id"] == current else ""
+                table.add_row(
+                    str(idx),
+                    m["key"],
+                    m.get("tier", "standard"),
+                    m.get("provider", ""),
+                    is_active,
+                )
+            self.console.print(table)
+
+            if len(models_list) > 25:
+                self.console.print(f"[dim]Showing 25 of {len(models_list)} matching models ({total_count} total available in OpenCode).[/dim]")
+            self.console.print(f"[dim]Current Head Model: [bold]{current}[/bold][/dim]")
+
+            try:
+                choice = self.console.input(
+                    "\n[bold]Select [# / model_id], type search filter (e.g. 'claude', 'deepseek', 'free'), or Enter to keep: [/bold]"
+                ).strip()
+                if not choice:
+                    return
+
+                if choice.isdigit():
+                    idx = int(choice) - 1
+                    if 0 <= idx < len(display_slice):
+                        selected = display_slice[idx]["key"]
+                        cfg.set_head_model(selected)
+                        self.console.print(f"[green]✓ Head Supervisor Model set to:[/green] [bold bright_cyan]{selected}[/bold bright_cyan]")
+                        return
+                    else:
+                        self.console.print("[red]Invalid number.[/red]")
+                        continue
+
+                # Check if exact model ID
+                found = next((m for m in all_models if m["key"].lower() == choice.lower() or m["model_id"].lower() == choice.lower()), None)
+                if found:
+                    cfg.set_head_model(found["key"])
+                    self.console.print(f"[green]✓ Head Supervisor Model set to:[/green] [bold bright_cyan]{found['key']}[/bold bright_cyan]")
+                    return
+
+                # Otherwise treat input as search query
+                filter_str = choice
+            except (EOFError, KeyboardInterrupt):
+                break
 
     def _cmd_sub_models(self, arg: str) -> None:
         """/sub-models — View and customize models assigned to sub-agent roles."""
@@ -1256,7 +1269,6 @@ class OporchREPL:
 
     def _customize_sub_models_interactive(self, run_id: str, roster_rows: list[dict[str, Any]]) -> None:
         """Interactive model picker for sub-agent roles."""
-        models_list = cfg.list_models_summary()
         from .db import OporchDB
 
         table = Table(title="Select Sub-Agent Role to Change Model", show_header=True)
@@ -1287,56 +1299,73 @@ class OporchREPL:
 
             target_role = roster_rows[r_idx]["role_key"]
 
-            # Show available models
-            m_table = Table(title=f"Choose Model for Sub-Agent '{target_role}'", show_header=True)
-            m_table.add_column("#", justify="right", style="dim", width=4)
-            m_table.add_column("Model Key", style="bold")
-            m_table.add_column("Tier", style="cyan")
-            m_table.add_column("Provider")
-            m_table.add_column("Model ID", style="dim")
+            # Filter loop for model selection
+            filter_str = ""
+            all_models = cfg.list_models_summary()
+            total_count = len(all_models)
 
-            for m_idx, m in enumerate(models_list, 1):
-                m_table.add_row(
-                    str(m_idx),
-                    m["key"],
-                    m.get("tier", "standard"),
-                    m.get("provider", ""),
-                    m.get("model_id", ""),
+            while True:
+                models_list = cfg.list_models_summary(filter_query=filter_str)
+                display_slice = models_list[:25]
+
+                m_table = Table(
+                    title=f"Choose Model for Sub-Agent '{target_role}'" + (f" (Filter: '{filter_str}')" if filter_str else ""),
+                    show_header=True,
                 )
-            self.console.print(m_table)
+                m_table.add_column("#", justify="right", style="dim", width=4)
+                m_table.add_column("Model Key / ID", style="bold")
+                m_table.add_column("Tier", style="cyan")
+                m_table.add_column("Provider")
 
-            m_choice = self.console.input(f"\n[bold]Assign model to '{target_role}' [# or key]: [/bold]").strip()
-            if not m_choice:
-                return
-
-            new_model = None
-            if m_choice.isdigit():
-                idx = int(m_choice) - 1
-                if 0 <= idx < len(models_list):
-                    new_model = models_list[idx]["key"]
-            else:
-                if any(m["key"] == m_choice for m in models_list):
-                    new_model = m_choice
-
-            if not new_model:
-                self.console.print("[red]Invalid model choice.[/red]")
-                return
-
-            # Update DB roster and roles config
-            cfg.set_role_model(target_role, new_model)
-            if run_id and run_id != "default":
-                db = OporchDB()
-                try:
-                    db._execute(
-                        "UPDATE roster SET model = ? WHERE run_id = ? AND role_key = ? AND active_until IS NULL",
-                        (new_model, run_id, target_role),
+                for m_idx, m in enumerate(display_slice, 1):
+                    m_table.add_row(
+                        str(m_idx),
+                        m["key"],
+                        m.get("tier", "standard"),
+                        m.get("provider", ""),
                     )
-                finally:
-                    db.close()
+                self.console.print(m_table)
 
-            self.console.print(f"[green]✓ Assigned model [bold]{new_model}[/bold] to sub-agent role [bold cyan]{target_role}[/bold cyan][/green]")
+                if len(models_list) > 25:
+                    self.console.print(f"[dim]Showing 25 of {len(models_list)} matching models ({total_count} total available in OpenCode).[/dim]")
+
+                m_choice = self.console.input(
+                    f"\n[bold]Assign to '{target_role}' [# / model_id, or type filter e.g. 'claude']: [/bold]"
+                ).strip()
+                if not m_choice:
+                    return
+
+                new_model = None
+                if m_choice.isdigit():
+                    idx = int(m_choice) - 1
+                    if 0 <= idx < len(display_slice):
+                        new_model = display_slice[idx]["key"]
+                else:
+                    found = next((m for m in all_models if m["key"].lower() == m_choice.lower() or m["model_id"].lower() == m_choice.lower()), None)
+                    if found:
+                        new_model = found["key"]
+                    else:
+                        filter_str = m_choice
+                        continue
+
+                if new_model:
+                    # Update DB roster and roles config
+                    cfg.set_role_model(target_role, new_model)
+                    if run_id and run_id != "default":
+                        db = OporchDB()
+                        try:
+                            db._execute(
+                                "UPDATE roster SET model = ? WHERE run_id = ? AND role_key = ? AND active_until IS NULL",
+                                (new_model, run_id, target_role),
+                            )
+                        finally:
+                            db.close()
+
+                    self.console.print(f"[green]✓ Assigned model [bold]{new_model}[/bold] to sub-agent role [bold cyan]{target_role}[/bold cyan][/green]")
+                    break
         except (EOFError, KeyboardInterrupt):
             pass
+
 
     # ======================================================================
     # Proxy stats command
