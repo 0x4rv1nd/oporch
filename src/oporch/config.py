@@ -256,7 +256,17 @@ def list_models_summary(filter_query: str | None = None) -> list[dict[str, Any]]
         q = filter_query.strip().lower()
         out = [m for m in out if q in m["key"].lower() or q in m["model_id"].lower() or q in m["provider"].lower()]
 
+    # Prioritize: opencode models first, then free models, then configured, then alphabetical
+    def sort_key(m):
+        mid_lower = m["model_id"].lower()
+        is_opencode = 0 if mid_lower.startswith("opencode/") else 1
+        is_free = 0 if "free" in mid_lower or "pickle" in mid_lower else 1
+        is_conf = 0 if m.get("is_configured") else 1
+        return (is_opencode, is_free, is_conf, m["key"].lower())
+
+    out.sort(key=sort_key)
     return out
+
 
 
 

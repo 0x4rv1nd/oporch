@@ -1166,80 +1166,152 @@ class OporchREPL:
     # Head Model & Sub-Agent Model Selection commands
     # ======================================================================
 
-    def _cmd_head_model(self, arg: str) -> None:
-        """/head-model [query|model_name] — View, search, or select the Head Supervisor Model."""
-        current = cfg.get_head_model()
-        query = arg.strip() if arg else ""
+    def _interactive_model_picker(self, title: str, current_value: str) -> str | None:
+        """Fully interactive arrow keys + live search model picker."""
+        import sys
 
-        # If direct exact match provided
+        def get_key() -> str | None:
+            if sys.platform == "win32":
+                import msvcrt
+                ch = msvcrt.getch()
+                if ch in (b'\x00', b'\xe0'):
+                    ch2 = msvcrt.getch()
+                    if ch2 == b'H': return "up"
+                    if ch2 == b'P': return "down"
+                    return None
+                if ch == b'\r': return "enter"
+                if ch == b'\x1b': return "esc"
+                if ch == b'\x08': return "backspace"
+                try:
+                    return ch.decode('utf-8')
+                except Exception:
+                    return None
+            else:
+                import termios
+                import tty
+                fd = sys.stdin.fileno()
+                old_settings = termios.tcgetattr(fd)
+                try:
+                    tty.setraw(fd)
+                    ch = sys.stdin.read(1)
+                    if ch == '\x1b':
+                        ch2 = sys.stdin.read(1)
+                        if ch2 == '[':
+                            ch3 = sys.stdin.read(1)
+                            if ch3 == 'A': return "up"
+                            if ch3 == 'B': return "down"
+                        return "esc"
+                    elif ch in ('\r', '\n'):
+                        return "enter"
+                    elif ch == '\x7f':
+                        return "backspace"
+                    return ch
+                finally:
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
         all_models = cfg.list_models_summary()
-        exact_match = next((m for m in all_models if m["key"].lower() == query.lower() or m["model_id"].lower() == query.lower()), None)
-        if exact_match and query:
-            cfg.set_head_model(exact_match["key"])
-            self.console.print(f"[green]✓ Head Supervisor Model set to:[/green] [bold bright_cyan]{exact_match['key']}[/bold bright_cyan]")
+        query = ""
+        highlighted = 0
+        last_num_lines = 0
+
+        try:
+            # Hide cursor
+            self.console.print("\033[?25l", end="")
+            while True:
+                # Filter models
+                filtered = [
+                    m for m in all_models
+                    if query.lower() in m["key"].lower() or query.lower() in m["model_id"].lower()
+                ]
+
+                # Ensure highlighting is clamped
+                if not filtered:
+                    highlighted = 0
+                else:
+                    highlighted = max(0, min(highlighted, len(filtered) - 1))
+
+                # Clear previous render
+                if last_num_lines > 0:
+                    sys.stdout.write(f"\033[{last_num_lines}A\033[J")
+                    sys.stdout.flush()
+
+                # Build picker output lines
+                lines = []
+                lines.append(f"[bold]{title}[/bold]")
+                lines.append(f"🔍 Search: [bold bright_cyan]{query}[/bold bright_cyan]_")
+                lines.append("[dim]Use ↑/↓ arrow keys to navigate, type to search, Enter to select, Esc to cancel[/dim]")
+                lines.append("")
+
+                visible_count = 12
+                start_idx = max(0, highlighted - (visible_count // 2))
+                end_idx = min(len(filtered), start_idx + visible_count)
+                if end_idx - start_idx < visible_count:
+                    start_idx = max(0, end_idx - visible_count)
+
+                display_slice = filtered[start_idx:end_idx]
+
+                for idx, m in enumerate(display_slice, start_idx + 1):
+                    # Highlight selected line
+                    is_sel = idx - 1 == highlighted
+                    pointer = "➔ " if is_sel else "  "
+                    style = "bold bright_cyan reverse" if is_sel else "dim" if not m.get("is_configured") else "white"
+                    is_active = " [green](current)[/green]" if m["key"] == current_value or m["model_id"] == current_value else ""
+                    
+                    lines.append(f"{pointer}[{style}]{m['key']}[/{style}] [cyan]({m.get('tier', 'standard')})[/cyan][dim] - {m.get('model_id')}[/dim]{is_active}")
+
+                if len(filtered) > visible_count:
+                    lines.append(f"[dim]... showing {len(display_slice)} of {len(filtered)} matching models (total {len(all_models)}) ...[/dim]")
+
+                if not filtered:
+                    lines.append("[red]No matching models found.[/red]")
+
+                # Render lines
+                for line in lines:
+                    self.console.print(line)
+                last_num_lines = len(lines)
+
+                # Wait for keystroke
+                key = get_key()
+                if key is None:
+                    continue
+                elif key == "up":
+                    highlighted = max(0, highlighted - 1)
+                elif key == "down":
+                    highlighted = min(len(filtered) - 1, highlighted + 1) if filtered else 0
+                elif key == "backspace":
+                    query = query[:-1]
+                    highlighted = 0
+                elif key == "esc":
+                    return None
+                elif key == "enter":
+                    if filtered:
+                        return filtered[highlighted]["key"]
+                    return None
+                elif len(key) == 1:
+                    query += key
+                    highlighted = 0
+        finally:
+            # Show cursor
+            self.console.print("\033[?25h", end="")
+
+    def _cmd_head_model(self, arg: str) -> None:
+        """/head-model [model_name] — View or select the Head Supervisor Model."""
+        current = cfg.get_head_model()
+        if arg:
+            target = arg.strip()
+            all_models = cfg.list_models_summary()
+            match = next((m for m in all_models if m["key"].lower() == target.lower() or m["model_id"].lower() == target.lower()), None)
+            if match:
+                cfg.set_head_model(match["key"])
+                self.console.print(f"[green]✓ Head Supervisor Model set to:[/green] [bold bright_cyan]{match['key']}[/bold bright_cyan]")
+            else:
+                self.console.print(f"[red]Model '{target}' not found.[/red]")
             return
 
-        # Filtered list
-        filter_str = query
-        while True:
-            models_list = cfg.list_models_summary(filter_query=filter_str)
-            total_count = len(cfg.list_models_summary())
-
-            table = Table(
-                title=f"🤖 Head Supervisor Model Selection" + (f" (Filter: '{filter_str}')" if filter_str else ""),
-                show_header=True,
-            )
-            table.add_column("#", justify="right", style="dim", width=4)
-            table.add_column("Model Key / ID", style="bold")
-            table.add_column("Tier", style="cyan")
-            table.add_column("Provider")
-            table.add_column("Active", justify="center")
-
-            display_slice = models_list[:25]
-            for idx, m in enumerate(display_slice, 1):
-                is_active = "[green]✓ ACTIVE[/green]" if m["key"] == current or m["model_id"] == current else ""
-                table.add_row(
-                    str(idx),
-                    m["key"],
-                    m.get("tier", "standard"),
-                    m.get("provider", ""),
-                    is_active,
-                )
-            self.console.print(table)
-
-            if len(models_list) > 25:
-                self.console.print(f"[dim]Showing 25 of {len(models_list)} matching models ({total_count} total available in OpenCode).[/dim]")
-            self.console.print(f"[dim]Current Head Model: [bold]{current}[/bold][/dim]")
-
-            try:
-                choice = self.console.input(
-                    "\n[bold]Select [# / model_id], type search filter (e.g. 'claude', 'deepseek', 'free'), or Enter to keep: [/bold]"
-                ).strip()
-                if not choice:
-                    return
-
-                if choice.isdigit():
-                    idx = int(choice) - 1
-                    if 0 <= idx < len(display_slice):
-                        selected = display_slice[idx]["key"]
-                        cfg.set_head_model(selected)
-                        self.console.print(f"[green]✓ Head Supervisor Model set to:[/green] [bold bright_cyan]{selected}[/bold bright_cyan]")
-                        return
-                    else:
-                        self.console.print("[red]Invalid number.[/red]")
-                        continue
-
-                # Check if exact model ID
-                found = next((m for m in all_models if m["key"].lower() == choice.lower() or m["model_id"].lower() == choice.lower()), None)
-                if found:
-                    cfg.set_head_model(found["key"])
-                    self.console.print(f"[green]✓ Head Supervisor Model set to:[/green] [bold bright_cyan]{found['key']}[/bold bright_cyan]")
-                    return
-
-                # Otherwise treat input as search query
-                filter_str = choice
-            except (EOFError, KeyboardInterrupt):
-                break
+        selected = self._interactive_model_picker("🤖 Select Head Supervisor Model", current)
+        if selected:
+            cfg.set_head_model(selected)
+            self.console.print(f"[green]✓ Head Supervisor Model set to:[/green] [bold bright_cyan]{selected}[/bold bright_cyan]")
 
     def _cmd_sub_models(self, arg: str) -> None:
         """/sub-models — View and customize models assigned to sub-agent roles."""
@@ -1250,7 +1322,6 @@ class OporchREPL:
         try:
             roster = db.get_roster(run_id) if run_id else []
             if not roster:
-                # Load configured roles if no active run
                 roles_cfg = cfg.load_roles()
                 roster = [
                     {"role_key": k, "model": v.model, "fallback": v.fallback, "max_workers": v.max_workers, "domains": []}
@@ -1298,71 +1369,22 @@ class OporchREPL:
                 return
 
             target_role = roster_rows[r_idx]["role_key"]
+            current_model_for_role = roster_rows[r_idx].get("model") or "default"
 
-            # Filter loop for model selection
-            filter_str = ""
-            all_models = cfg.list_models_summary()
-            total_count = len(all_models)
+            new_model = self._interactive_model_picker(f"🤖 Select Model for Sub-Agent '{target_role}'", current_model_for_role)
+            if new_model:
+                cfg.set_role_model(target_role, new_model)
+                if run_id and run_id != "default":
+                    db = OporchDB()
+                    try:
+                        db._execute(
+                            "UPDATE roster SET model = ? WHERE run_id = ? AND role_key = ? AND active_until IS NULL",
+                            (new_model, run_id, target_role),
+                        )
+                    finally:
+                        db.close()
 
-            while True:
-                models_list = cfg.list_models_summary(filter_query=filter_str)
-                display_slice = models_list[:25]
-
-                m_table = Table(
-                    title=f"Choose Model for Sub-Agent '{target_role}'" + (f" (Filter: '{filter_str}')" if filter_str else ""),
-                    show_header=True,
-                )
-                m_table.add_column("#", justify="right", style="dim", width=4)
-                m_table.add_column("Model Key / ID", style="bold")
-                m_table.add_column("Tier", style="cyan")
-                m_table.add_column("Provider")
-
-                for m_idx, m in enumerate(display_slice, 1):
-                    m_table.add_row(
-                        str(m_idx),
-                        m["key"],
-                        m.get("tier", "standard"),
-                        m.get("provider", ""),
-                    )
-                self.console.print(m_table)
-
-                if len(models_list) > 25:
-                    self.console.print(f"[dim]Showing 25 of {len(models_list)} matching models ({total_count} total available in OpenCode).[/dim]")
-
-                m_choice = self.console.input(
-                    f"\n[bold]Assign to '{target_role}' [# / model_id, or type filter e.g. 'claude']: [/bold]"
-                ).strip()
-                if not m_choice:
-                    return
-
-                new_model = None
-                if m_choice.isdigit():
-                    idx = int(m_choice) - 1
-                    if 0 <= idx < len(display_slice):
-                        new_model = display_slice[idx]["key"]
-                else:
-                    found = next((m for m in all_models if m["key"].lower() == m_choice.lower() or m["model_id"].lower() == m_choice.lower()), None)
-                    if found:
-                        new_model = found["key"]
-                    else:
-                        filter_str = m_choice
-                        continue
-
-                if new_model:
-                    # Update DB roster and roles config
-                    cfg.set_role_model(target_role, new_model)
-                    if run_id and run_id != "default":
-                        db = OporchDB()
-                        try:
-                            db._execute(
-                                "UPDATE roster SET model = ? WHERE run_id = ? AND role_key = ? AND active_until IS NULL",
-                                (new_model, run_id, target_role),
-                            )
-                        finally:
-                            db.close()
-
-                    self.console.print(f"[green]✓ Assigned model [bold]{new_model}[/bold] to sub-agent role [bold cyan]{target_role}[/bold cyan][/green]")
-                    break
+                self.console.print(f"[green]✓ Assigned model [bold]{new_model}[/bold] to sub-agent role [bold cyan]{target_role}[/bold cyan][/green]")
         except (EOFError, KeyboardInterrupt):
             pass
 
